@@ -6,6 +6,7 @@
 #include "StulWeaponFireAbility.generated.h"
 
 class UAbilityTask_WaitInputRelease;
+class UAbilityTask_WaitGameplayTagRemoved;
 class AStulWeapon;
 class UStulWeaponDefinition;
 
@@ -59,6 +60,8 @@ protected:
 
 private:
 	/************************ Local Firing ************************/
+	bool RequestCustomReloadInterruption(bool& bOutWaitForCurrentCycle);
+	void StartFiring();
 	void BeginLocalFiring();
 	bool SubmitLocalShot();
 	void ScheduleNextLocalShot(float Delay);
@@ -68,6 +71,8 @@ private:
 
 	UFUNCTION()
 	void HandleInputReleased(float TimeHeld);
+	UFUNCTION()
+	void HandleReloadEnded();
 
 	/************************ Target Data ************************/
 	void BindServerTargetData();
@@ -92,6 +97,8 @@ private:
 	/************************ Runtime State ************************/
 	UPROPERTY(Transient)
 	TObjectPtr<UAbilityTask_WaitInputRelease> WaitInputReleaseTask;
+	UPROPERTY(Transient)
+	TObjectPtr<UAbilityTask_WaitGameplayTagRemoved> WaitReloadEndTask;
 
 	FTimerHandle LocalShotTimer;
 	double EarliestNextLocalShotTime = -TNumericLimits<double>::Max();
@@ -104,4 +111,6 @@ private:
 	bool bInputReleased = false;
 	bool bServerTargetDataBound = false;
 	bool bFiringStarted = false;
+	bool bWaitingForReload = false;
+	bool bCanUsePendingReloadAmmo = false;
 };

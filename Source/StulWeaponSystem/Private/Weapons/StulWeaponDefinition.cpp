@@ -46,9 +46,9 @@ void UStulWeaponDefinition::GetPresentationAssetPaths(TArray<FSoftObjectPath>& O
 	{
 		OutPaths.AddUnique(Presentation.FireSound.ToSoftObjectPath());
 	}
-	if (!Presentation.HitscanTracer.IsNull())
+	if (ShotType == EStulWeaponShotType::Hitscan && !HitscanTracer.System.IsNull())
 	{
-		OutPaths.AddUnique(Presentation.HitscanTracer.ToSoftObjectPath());
+		OutPaths.AddUnique(HitscanTracer.System.ToSoftObjectPath());
 	}
 	if (!Presentation.DefaultImpactEffect.IsNull())
 	{
@@ -118,6 +118,18 @@ EDataValidationResult UStulWeaponDefinition::IsDataValid(FDataValidationContext&
 	if (ShotType == EStulWeaponShotType::Hitscan && MaxRange <= 0.0f)
 	{
 		AddError(NSLOCTEXT("StulWeaponValidation", "InvalidHitscanRange", "Hitscan weapons must have a MaxRange greater than zero."));
+	}
+	if (ShotType == EStulWeaponShotType::Hitscan && !HitscanTracer.System.IsNull() && HitscanTracer.Speed <= 0.0f)
+	{
+		AddError(NSLOCTEXT("StulWeaponValidation", "InvalidTracerSpeed", "Configured hitscan tracers must have a Speed greater than zero."));
+	}
+	if (ShotType == EStulWeaponShotType::Hitscan && !HitscanTracer.System.IsNull() && HitscanTracer.Length <= 0.0f)
+	{
+		AddError(NSLOCTEXT("StulWeaponValidation", "InvalidTracerLength", "Configured hitscan tracers must have a Length greater than zero."));
+	}
+	if (ShotType == EStulWeaponShotType::Hitscan && !HitscanTracer.System.IsNull() && HitscanTracer.Width <= 0.0f)
+	{
+		AddError(NSLOCTEXT("StulWeaponValidation", "InvalidTracerWidth", "Configured hitscan tracers must have a Width greater than zero."));
 	}
 	for (const TPair<int32, FStulWeaponShotPattern>& PatternPair : ShotPatterns)
 	{

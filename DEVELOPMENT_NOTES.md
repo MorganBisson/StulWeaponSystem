@@ -271,17 +271,20 @@ Ils peuvent d'abord utiliser `Print String` ou des formes de debug. Les assets p
 
 Une première base volontairement simple est maintenant disponible :
 
-- `FStulWeaponPresentationData`, dans `Public/Weapons/Presentation/StulWeaponPresentationTypes.h`, regroupe les références facultatives `MuzzleFlash`, `FireSound`, `HitscanTracer`, `DefaultImpactEffect` et `DefaultImpactSound`, les maps `ImpactEffectsBySurface` et `ImpactSoundsBySurface`, ainsi que `MuzzleColor` et `TracerColor` ;
+- `FStulWeaponPresentationData`, dans `Public/Weapons/Presentation/StulWeaponPresentationTypes.h`, regroupe les références facultatives communes `MuzzleFlash`, `FireSound`, `DefaultImpactEffect` et `DefaultImpactSound`, les maps `ImpactEffectsBySurface` et `ImpactSoundsBySurface`, ainsi que `MuzzleColor` ;
+- `FStulWeaponTracerData` regroupe le Niagara et les paramètres `Color`, `Speed`, `Length` et `Width`. `UStulWeaponDefinition::HitscanTracer` expose ce bloc uniquement lorsque `ShotType` vaut `Hitscan`, afin de ne pas masquer les autres présentations utiles aux armes à projectile ;
 - `UStulWeaponDefinition::Presentation` contient cette structure directement afin de tester le workflow sans introduire prématurément un nouveau Data Asset ou un système de fragments ;
+- dans le panneau Details, `ShotType` est placé dans `Shooting|General` avant les données qu'il conditionne. Les données audiovisuelles sont affichées sous `Visual|Effects` et les structures utilisent `ShowOnlyInnerProperties`, ce qui supprime les niveaux redondants tels que `HitscanTracer > Hitscan Tracer` sans renommer les propriétés sérialisées existantes ;
+- le Data Asset n'expose plus que quatre grandes familles fonctionnelles : `Initialization`, `Display`, `Shooting` et `Visual`. Les modes de tir, timings, chargeur, reload, spread, patterns, pénétration, ballistique et recoil sont des sous-catégories de `Shooting`, tandis que mesh, attachements, animation et effets Fire/Tracer/Impact sont regroupés sous `Visual` ;
 - toutes les références sont souples et rejoignent `GetPresentationAssetPaths`, donc elles sont préchargées avec les ressources visuelles de l'arme et ne sont jamais chargées par le serveur dédié ;
-- `AStulWeapon::GetPresentationData` est un `BlueprintNativeEvent`. Son implémentation par défaut copie les données de la Weapon Definition, mais un projet peut déjà la surcharger pour appliquer quelques choix runtime sans modifier les Gameplay Cue Blueprints ;
+- `AStulWeapon::GetPresentationData` et `GetHitscanTracerData` sont des `BlueprintNativeEvent`. Leurs implémentations par défaut copient les données de la Weapon Definition, mais un projet peut les surcharger pour appliquer quelques choix runtime sans modifier les Gameplay Cues ;
 - un champ vide est intentionnel et le cue doit simplement ignorer l'effet correspondant ; une référence renseignée mais absente après le préchargement reste une erreur d'initialisation de l'arme ;
 - la dépendance publique `Niagara` a été ajoutée car la structure publique expose des `TSoftObjectPtr<UNiagaraSystem>` ;
 - UnrealHeaderTool, la compilation du module et l'édition de liens de `Boston_ProjectEditor Win64 Development` réussissent après cette tranche.
 
-Pour le premier test, chaque Gameplay Cue récupère `MyTarget`, le caste en `AStulWeapon`, appelle `GetPresentationData` puis joue uniquement les références configurées. Le tracer reconstruit son extrémité avec `Location + Normal * RawMagnitude`. Les soft references ont déjà été préchargées par l'arme ; le cue ne doit pas démarrer de chargement asynchrone au moment du tir.
+Pour le premier test, les Gameplay Cues récupèrent `MyTarget`, le castent en `AStulWeapon`, puis jouent uniquement les références configurées. Le tracer utilise le `UGameplayCueNotify_Static` natif `UStulWeaponTracerCue`, appelle `GetHitscanTracerData` et reconstruit son extrémité avec `Location + Normal * RawMagnitude`. Les soft references ont déjà été préchargées par l'arme ; le cue ne démarre aucun chargement synchrone ou asynchrone au moment du tir.
 
-Après avoir créé le composant Niagara du muzzle, le cue `Fire` applique `MuzzleColor` avec `Set Niagara Variable (Linear Color)` sur le paramètre standard `User.MuzzleColor`. Le cue `Tracer` fait de même avec `TracerColor` sur `User.TracerColor` et transmet ses extrémités par `User.TracerStart` et `User.TracerEnd`. Un Niagara qui ne déclare pas l'un de ces paramètres ignore simplement la valeur correspondante.
+Après avoir créé le composant Niagara du muzzle, le cue `Fire` applique `MuzzleColor` avec `Set Niagara Variable (Linear Color)` sur le paramètre standard `User.MuzzleColor`. Le cue natif `Tracer` crée `NS_BulletBeam` avec le pool `AutoRelease`, renseigne les paramètres `User.Start`, `User.Target`, `User.Color`, `User.Speed`, `User.Length` et `User.Width`, puis active le composant afin qu'aucune frame ne soit simulée avec les valeurs par défaut.
 
 Le cue `Impact` récupère le `PhysicalMaterial` depuis ses paramètres ou le `HitResult` de l'`EffectContext`, en déduit le `SurfaceType`, cherche d'abord ce type dans `ImpactEffectsBySurface` et `ImpactSoundsBySurface`, puis utilise `DefaultImpactEffect` et `DefaultImpactSound` comme fallbacks indépendants. Les traces hitscan demandaient déjà le Physical Material ; la collision projectile utilise désormais `bReturnMaterialOnMove` afin de fournir la même information.
 
@@ -361,6 +364,37 @@ Matrice de test à reprendre :
 7. valider provisoirement les Gameplay Cues Fire, Tracer et Impact avec des `Print String` avant d'intégrer des assets visuels.
 
 `Boston_ProjectEditor Win64 Development` a compilé et lié avec succès après cette tranche, UHT inclus.
+
+## Point de reprise — interruption du reload Custom par Fire
+
+Une pression sur Fire pendant un reload incrémental interrompt désormais le rechargement selon les munitions déjà disponibles, puis exécute l'action de tir demandée :
+
+- `UStulWeaponReloadAbility` reste l'unique ability de rechargement pour éviter de dupliquer l'activation, les événements, la restauration GAS et la logique réseau de `Full` et `Custom` ;
+- `UStulWeaponFireAbility` n'est plus bloquée globalement par `State.Reloading` : son `CanActivateAbility` refuse toujours un reload `Full`, mais accepte un reload `Custom` actif ;
+- si au moins une munition est déjà disponible, Fire annule immédiatement Reload et le cycle d'insertion en cours ne produit aucun `Reload.Commit` ;
+- si le chargeur est vide, Fire demande à Reload de terminer uniquement l'insertion en cours, attend la suppression de `State.Reloading`, puis commence le tir. Le cycle applique `AmmoRestore`, émet `Reload.Commit` et termine Reload comme annulée, ou comme complétée si cette insertion remplit le chargeur ;
+- l'activation `LocalPredicted` de Fire transmet naturellement la même demande à l'instance autoritaire : le client ne force pas prématurément la fin du reload serveur et chaque côté respecte la fin de son propre cycle ;
+- la cadence reste vérifiée avant l'activation de Fire. Un appui effectué avant que `FireInterval` autorise le prochain tir ne coupe donc pas Reload et n'est pas mis en attente ;
+- en mode `Single`, maintenir Fire ne provoque aucune réactivation : chaque tir exige un nouvel appui valide. Lorsque le chargeur est vide, l'appui qui attend l'insertion courante reste toutefois l'unique action de tir déjà acceptée ;
+- après une interruption à chargeur vide, le client peut consommer une fois la munition prédite par l'insertion terminée même si la réplication de `CurrentAmmo` n'est pas encore arrivée. Le serveur possède déjà la munition autoritaire et conserve la validation du coût ;
+- les éventuels modes `Burst` et `Automatic` conservent leur comportement générique existant sans imposer ces modes aux armes à rechargement cartouche par cartouche ;
+- le reload `Full` conserve son comportement bloquant et ne peut pas être interrompu par Fire.
+
+La relation inverse est volontairement asymétrique : Reload possède désormais `State.Firing` dans ses `ActivationBlockedTags` et ne possède plus `Ability.Fire` dans ses `CancelAbilitiesWithTag`. Une demande de reload effectuée pendant une rafale ou un tir automatique actif est refusée et ne coupe pas Fire. Comme Reload utilise `OnInputTriggered`, le joueur doit appuyer de nouveau une fois Fire terminée ; aucune demande de reload n'est mise en attente implicitement.
+
+Tests PIE à effectuer sur le joueur serveur et le client propriétaire :
+
+1. avec au moins une munition pendant un reload `Custom`, appuyer sur Fire après la cadence : Reload et l'insertion courante doivent être annulés immédiatement, puis le tir doit partir ;
+2. répéter avant la fin de `FireInterval` : Fire doit être refusée, Reload doit continuer et l'insertion doit être validée normalement ;
+3. avec zéro munition, appuyer puis relâcher Fire : l'insertion courante doit produire exactement un `Reload.Commit`, puis Reload doit finir et un tir doit partir ;
+4. en mode `Single`, maintenir Fire après ce tir : aucun second tir ne doit partir sans un nouvel appui ;
+5. déclencher Fire juste avant et juste après un `Reload.Commit` afin de vérifier qu'aucune insertion ni aucun tir n'est dupliqué ;
+6. interrompre sur la dernière insertion : Reload doit émettre `Completed`, puis Fire doit démarrer ;
+7. en reload `Full`, appuyer sur Fire : Reload doit continuer et aucun tir ne doit être mis en attente ;
+8. surveiller la synchronisation de `CurrentAmmo`, `Reload.Commit`, `Reload.Cancelled` ou `Reload.Completed`, ainsi que `Fire.Start` entre client et serveur.
+9. pendant une rafale, appuyer sur Reload : la rafale doit se terminer sans interruption et Reload doit exiger un nouvel appui après la fin de Fire.
+
+UnrealHeaderTool et les compilations C++ du module réussissent après cette tranche. L'édition de liens reste à relancer après fermeture de l'éditeur : `UnrealEditor-StulWeaponSystem.dll` est verrouillée par `UnrealEditor.exe` via le débogueur Rider.
 
 ## Vérifications en attente
 

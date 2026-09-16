@@ -52,11 +52,11 @@ struct STULWEAPONSYSTEM_API FStulWeaponAimData
 	GENERATED_BODY()
 
 	/** Optical magnification requested from the owning project's camera system. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Aim", meta = (ClampMin = "1.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Aim", meta = (ClampMin = "1.0"))
 	float Magnification = 1.0f;
 
 	/** Socket used by the owning project's alignment and IK systems. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Aim")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Aim")
 	FName AimSocketName = TEXT("AimSocket");
 };
 

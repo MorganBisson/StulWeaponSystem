@@ -20,9 +20,34 @@ UStulWeaponReloadAbility::UStulWeaponReloadAbility()
 	SetAssetTags(FGameplayTagContainer(StulWeaponGameplayTags::Ability_Reload));
 	ActivationOwnedTags.AddTag(StulWeaponGameplayTags::State_Reloading);
 	ActivationBlockedTags.AddTag(StulWeaponGameplayTags::State_Reloading);
+	ActivationBlockedTags.AddTag(StulWeaponGameplayTags::State_Firing);
 	ActivationBlockedTags.AddTag(StulWeaponGameplayTags::State_ChangingFireMode);
-	CancelAbilitiesWithTag.AddTag(StulWeaponGameplayTags::Ability_Fire);
 	CancelAbilitiesWithTag.AddTag(StulWeaponGameplayTags::Ability_Aim);
+}
+
+bool UStulWeaponReloadAbility::RequestInterruptForFire(bool& bOutWaitForCurrentCycle)
+{
+	bOutWaitForCurrentCycle = false;
+	const AStulWeapon* Weapon = GetStulWeapon();
+	const UStulWeaponDefinition* Definition = Weapon ? Weapon->GetWeaponDefinition() : nullptr;
+	const UStulWeaponAttributeSet* Attributes = GetStulWeaponAttributeSet();
+	if (!IsActive() || !bReloadStarted || !Definition || !Attributes || Definition->ReloadType != EStulWeaponReloadType::Custom)
+	{
+		return false;
+	}
+
+	const bool bAuthority = CurrentActorInfo && CurrentActorInfo->IsNetAuthority();
+	const float EffectiveCurrentAmmo = bAuthority ? Attributes->GetCurrentAmmo() : FMath::Min(Attributes->GetMaxAmmo(), ReloadStartAmmo + static_cast<float>(AmmoRestoredDuringAbility));
+	bOutWaitForCurrentCycle = EffectiveCurrentAmmo < 1.0f - KINDA_SMALL_NUMBER;
+	if (bOutWaitForCurrentCycle)
+	{
+		bInterruptAfterCurrentCycle = true;
+		return true;
+	}
+
+	const bool bReplicateEndAbility = CurrentActorInfo && CurrentActorInfo->IsNetAuthority();
+	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, bReplicateEndAbility, true);
+	return true;
 }
 
 /*********************************************************************************************/
@@ -71,6 +96,7 @@ void UStulWeaponReloadAbility::ActivateAbility(const FGameplayAbilitySpecHandle 
 
 	AmmoRestoredDuringAbility = 0;
 	ReloadStartAmmo = GetStulWeaponAttributeSet() ? GetStulWeaponAttributeSet()->GetCurrentAmmo() : 0.0f;
+	bInterruptAfterCurrentCycle = false;
 	if (!StartReloadDelay())
 	{
 		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
@@ -98,6 +124,7 @@ void UStulWeaponReloadAbility::EndAbility(const FGameplayAbilitySpecHandle Handl
 		SendReloadEvent(bWasCancelled ? StulWeaponGameplayTags::Event_Reload_Cancelled : StulWeaponGameplayTags::Event_Reload_Completed, static_cast<float>(AmmoRestoredDuringAbility));
 	}
 	bReloadStarted = false;
+	bInterruptAfterCurrentCycle = false;
 
 	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
 
@@ -152,7 +179,15 @@ void UStulWeaponReloadAbility::HandleReloadDelayFinished()
 
 	const AStulWeapon* Weapon = GetStulWeapon();
 	const UStulWeaponDefinition* Definition = Weapon ? Weapon->GetWeaponDefinition() : nullptr;
-	const bool bShouldContinueIncrementalReload = Definition && Definition->ReloadType == EStulWeaponReloadType::Custom && CalculateAmmoToReload() > 0;
+	const bool bHasAmmoLeftToReload = CalculateAmmoToReload() > 0;
+	if (Definition && Definition->ReloadType == EStulWeaponReloadType::Custom && bInterruptAfterCurrentCycle && bHasAmmoLeftToReload)
+	{
+		const bool bReplicateEndAbility = CurrentActorInfo && CurrentActorInfo->IsNetAuthority();
+		EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, bReplicateEndAbility, true);
+		return;
+	}
+
+	const bool bShouldContinueIncrementalReload = Definition && Definition->ReloadType == EStulWeaponReloadType::Custom && bHasAmmoLeftToReload;
 	if (bShouldContinueIncrementalReload)
 	{
 		if (StartReloadDelay())

@@ -73,6 +73,10 @@ public:
 	UFUNCTION(BlueprintNativeEvent, BlueprintPure, Category = "Stul Weapon System|Presentation")
 	bool GetPresentationData(FStulWeaponPresentationData& OutPresentation) const;
 	virtual bool GetPresentationData_Implementation(FStulWeaponPresentationData& OutPresentation) const;
+	/** Returns the effective hitscan tracer presentation. Projects may override this for runtime weapon modifications. */
+	UFUNCTION(BlueprintNativeEvent, BlueprintPure, Category = "Stul Weapon System|Presentation")
+	bool GetHitscanTracerData(FStulWeaponTracerData& OutTracer) const;
+	virtual bool GetHitscanTracerData_Implementation(FStulWeaponTracerData& OutTracer) const;
 
 	/************************ Aim ************************/
 	/** Returns effective aim configuration. Future sight customizations may override this resolution point. */

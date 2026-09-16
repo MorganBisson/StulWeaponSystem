@@ -573,6 +573,18 @@ bool AStulWeapon::GetPresentationData_Implementation(FStulWeaponPresentationData
 	return true;
 }
 
+bool AStulWeapon::GetHitscanTracerData_Implementation(FStulWeaponTracerData& OutTracer) const
+{
+	OutTracer = FStulWeaponTracerData();
+	if (!WeaponDefinition || WeaponDefinition->ShotType != EStulWeaponShotType::Hitscan)
+	{
+		return false;
+	}
+
+	OutTracer = WeaponDefinition->HitscanTracer;
+	return true;
+}
+
 /*********************************************************************************************/
 /******************************************* Aim *********************************************/
 /*********************************************************************************************/

@@ -44,8 +44,18 @@ public:
 
 	/* ------------------------------- Display ------------------------------- */
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Display")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Display", meta = (ShowOnlyInnerProperties))
 	FStulWeaponDisplayData Display;
+
+	/* ---------------------------- Shooting setup --------------------------- */
+
+	/** Describes how shots from this weapon travel to their targets. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|General")
+	EStulWeaponShotType ShotType = EStulWeaponShotType::Hitscan;
+
+	/** Channel used to resolve the point under the crosshair before applying pattern and spread. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|General")
+	TEnumAsByte<ECollisionChannel> AimTraceChannel = ECC_Visibility;
 
 	/* -------------------------------- Visual ------------------------------- */
 
@@ -55,104 +65,108 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Visual")
 	FName MuzzleSocketName = TEXT("Muzzle");
 
-	/** Optional presentation consumed by the generic weapon Gameplay Cues. Dedicated servers never load these assets. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Presentation")
+	/** Optional audiovisual effects consumed by the generic weapon Gameplay Cues. Dedicated servers never load these assets. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Visual|Effects", meta = (ShowOnlyInnerProperties, DisplayName = "Effects"))
 	FStulWeaponPresentationData Presentation;
 
+	/** Optional client-side tracer used only by hitscan weapons. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Visual|Effects|Hitscan Tracer", meta = (ShowOnlyInnerProperties, EditCondition = "ShotType == EStulWeaponShotType::Hitscan", EditConditionHides))
+	FStulWeaponTracerData HitscanTracer;
+
 	/** Base aiming configuration. Future sights may override the resolved value at runtime. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Aim")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Aim", meta = (ShowOnlyInnerProperties))
 	FStulWeaponAimData AimData;
 
 	/* ----------------------------- Fire modes ------------------------------ */
 
 	/** Set of fire modes supported by this weapon. Cycle order is defined by the runtime weapon. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Fire Modes", meta = (Categories = "Stul.Weapon.FireMode"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Fire Modes", meta = (Categories = "Stul.Weapon.FireMode"))
 	FGameplayTagContainer AvailableFireModes;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Fire Modes", meta = (Categories = "Stul.Weapon.FireMode"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Fire Modes", meta = (Categories = "Stul.Weapon.FireMode"))
 	FGameplayTag DefaultFireModeTag;
 
 	/** Delay before a requested fire mode becomes active. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Fire Modes", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Fire Modes", meta = (ClampMin = "0.0", Units = "s"))
 	float BaseFireModeChangeDuration = 0.25f;
 
 	/* ----------------------------- Base stats ------------------------------ */
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Scaling")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Scaling")
 	TSoftObjectPtr<UCurveTable> MultipliersCurveTable;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Shooting", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|General", meta = (ClampMin = "0.0"))
 	float BaseDamage = 18.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Shooting", meta = (ClampMin = "1"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|General", meta = (ClampMin = "1"))
 	int32 BaseShotsPerFire = 1;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Shooting", meta = (ClampMin = "0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|General", meta = (ClampMin = "0"))
 	int32 BaseFireCost = 1;
 
 	/** Time in seconds between two consecutive shots. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Fire Timing", meta = (ClampMin = "0.001", Units = "s"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Timing", meta = (ClampMin = "0.001", Units = "s"))
 	float BaseFireInterval = 0.1f;
 
 	/** Delay from the final shot of one burst to the first shot of the next. Runtime never allows it below FireInterval. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Fire Timing", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Timing", meta = (ClampMin = "0.0", Units = "s"))
 	float BaseBurstInterval = 0.2f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Shooting", meta = (ClampMin = "1"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|General", meta = (ClampMin = "1"))
 	int32 BaseBurstShotCount = 3;
 
 	/* -------------------------------- Spread ------------------------------- */
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Spread", meta = (ClampMin = "0.0", Units = "deg"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", Units = "deg"))
 	float BaseMinSpread = 0.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Spread", meta = (ClampMin = "0.0", Units = "deg"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", Units = "deg"))
 	float BaseAirMinSpread = 7.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Spread", meta = (ClampMin = "0.0", Units = "deg"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", Units = "deg"))
 	float BaseMaxSpread = 25.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Spread", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float BaseCrouchSpreadMultiplier = 0.25f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Spread", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float BaseStandSpreadMultiplier = 0.45f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Spread", meta = (ClampMin = "1.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "1.0"))
 	float BaseAirSpreadMultiplier = 1.5f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Spread", meta = (ClampMin = "0.0", Units = "deg"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", Units = "deg"))
 	float BaseSpreadIncreasePerShot = 2.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Spread", meta = (ClampMin = "0.0", Units = "deg"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", Units = "deg"))
 	float BaseMaxSpreadOvershoot = 4.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Spread", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0"))
 	float BaseSpreadInterpSpeed = 5.0f;
 
 	/* ------------------------------- Reload -------------------------------- */
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Reload")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Reload")
 	EStulWeaponReloadType ReloadType = EStulWeaponReloadType::Full;
 
 	/** Number of rounds restored after each duration in the incremental Custom reload mode. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Reload", meta = (ClampMin = "1", EditCondition = "ReloadType == EStulWeaponReloadType::Custom", EditConditionHides))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Reload", meta = (ClampMin = "1", EditCondition = "ReloadType == EStulWeaponReloadType::Custom", EditConditionHides))
 	int32 BaseAmmoToReload = 1;
 
 	/** Full reload duration, or duration between two inserts in Custom mode, before modifiers are applied. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Reload", meta = (ClampMin = "0.001", Units = "s"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Reload", meta = (ClampMin = "0.001", Units = "s"))
 	float BaseReloadDuration = 1.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Magazine", meta = (ClampMin = "0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Magazine", meta = (ClampMin = "0"))
 	int32 BaseMagazineCapacity = 30;
 
 	/** Aim transition duration in seconds before modifiers are applied. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Aim", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Aim", meta = (ClampMin = "0.0", Units = "s"))
 	float BaseAimDuration = 0.2f;
 
 	/* ------------------------------- Patterns ------------------------------ */
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Base Stats|Patterns", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Patterns", meta = (ClampMin = "0.0"))
 	float BasePatternScale = 1.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Patterns")
@@ -173,13 +187,6 @@ public:
 	float BasePenetrationStrength = 0.0f;
 
 	/* ------------------------------ Ballistics ----------------------------- */
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Ballistics")
-	EStulWeaponShotType ShotType = EStulWeaponShotType::Hitscan;
-
-	/** Channel used to resolve the point under the crosshair before applying pattern and spread. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Ballistics")
-	TEnumAsByte<ECollisionChannel> AimTraceChannel = ECC_Visibility;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Hitscan", meta = (ClampMin = "0.0", Units = "cm", EditCondition = "ShotType == EStulWeaponShotType::Hitscan", EditConditionHides))
 	float MaxRange = 5000.0f;
@@ -204,32 +211,32 @@ public:
 
 	/* ------------------------------- Recoil -------------------------------- */
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Recoil")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Recoil")
 	TSoftObjectPtr<UCurveVector> RecoilCurve;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Recoil", meta = (ClampMin = "0.0"))
 	float RecoilRecoverySpeed = 5.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Recoil", meta = (ClampMin = "0.0"))
 	float RecoilSpeed = 2.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Recoil", meta = (ClampMin = "0.0"))
 	float RecoilKickMultiplier = 1.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Recoil", meta = (ClampMin = "0.0", Units = "s"))
 	float TimeBeforeRecoveryStarts = 0.2f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Recoil")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Recoil")
 	float RecoilKick = 10.0f;
 
 	/* ------------------------------ Animation ------------------------------ */
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Visual|Animation")
 	TSoftObjectPtr<UAnimSequence> FireAnimation;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Visual|Attachment")
 	FTransform GripAttachTransform;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Visual|Attachment")
 	FTransform HolsterAttachTransform;
 };

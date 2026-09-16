@@ -18,6 +18,9 @@ class STULWEAPONSYSTEM_API UStulWeaponReloadAbility : public UStulWeaponGameplay
 public:
 	UStulWeaponReloadAbility();
 
+	/** Interrupts a Custom reload immediately when ammo is available, or after the current insertion when empty. */
+	bool RequestInterruptForFire(bool& bOutWaitForCurrentCycle);
+
 protected:
 	/************************ Gameplay Ability ************************/
 	virtual bool CanActivateAbility(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayTagContainer* SourceTags = nullptr, const FGameplayTagContainer* TargetTags = nullptr, FGameplayTagContainer* OptionalRelevantTags = nullptr) const override;
@@ -43,4 +46,5 @@ private:
 	int32 AmmoRestoredDuringAbility = 0;
 	float ReloadStartAmmo = 0.0f;
 	bool bReloadStarted = false;
+	bool bInterruptAfterCurrentCycle = false;
 };

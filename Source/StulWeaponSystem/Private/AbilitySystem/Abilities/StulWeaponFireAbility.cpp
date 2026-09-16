@@ -1,8 +1,10 @@
 #include "AbilitySystem/Abilities/StulWeaponFireAbility.h"
 
 #include "Abilities/Tasks/AbilityTask_WaitInputRelease.h"
+#include "Abilities/Tasks/AbilityTask_WaitGameplayTag.h"
 #include "AbilitySystemBlueprintLibrary.h"
 #include "AbilitySystemComponent.h"
+#include "AbilitySystem/Abilities/StulWeaponReloadAbility.h"
 #include "AbilitySystemGlobals.h"
 #include "AbilitySystem/Effects/StulWeaponAmmoCostEffect.h"
 #include "AbilitySystem/StulWeaponAttributeSet.h"
@@ -27,7 +29,6 @@ UStulWeaponFireAbility::UStulWeaponFireAbility()
 	SetAssetTags(FGameplayTagContainer(StulWeaponGameplayTags::Ability_Fire));
 	ActivationOwnedTags.AddTag(StulWeaponGameplayTags::State_Firing);
 	ActivationBlockedTags.AddTag(StulWeaponGameplayTags::State_Firing);
-	ActivationBlockedTags.AddTag(StulWeaponGameplayTags::State_Reloading);
 	ActivationBlockedTags.AddTag(StulWeaponGameplayTags::State_ChangingFireMode);
 }
 
@@ -52,6 +53,8 @@ void UStulWeaponFireAbility::ActivateAbility(const FGameplayAbilitySpecHandle Ha
 	ShotsRemainingInBurst = 0;
 	AcceptedShotsInServerBurst = 0;
 	bFiringStarted = false;
+	bWaitingForReload = false;
+	bCanUsePendingReloadAmmo = false;
 
 	if (ActiveFireMode == StulWeaponGameplayTags::FireMode_Burst || ActiveFireMode == StulWeaponGameplayTags::FireMode_Automatic)
 	{
@@ -65,19 +68,32 @@ void UStulWeaponFireAbility::ActivateAbility(const FGameplayAbilitySpecHandle Ha
 		WaitInputReleaseTask->ReadyForActivation();
 	}
 
-	bFiringStarted = true;
-	Weapon->NotifyFiringStarted();
-	SendWeaponEvent(StulWeaponGameplayTags::Event_Fire_Start);
-	BindServerTargetData();
-	if (!IsActive())
+	if (Weapon->IsReloading())
 	{
-		return;
+		bool bWaitForCurrentReloadCycle = false;
+		if (!RequestCustomReloadInterruption(bWaitForCurrentReloadCycle))
+		{
+			EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+			return;
+		}
+
+		if (bWaitForCurrentReloadCycle)
+		{
+			bCanUsePendingReloadAmmo = true;
+			WaitReloadEndTask = UAbilityTask_WaitGameplayTagRemoved::WaitGameplayTagRemove(this, StulWeaponGameplayTags::State_Reloading, nullptr, true);
+			if (!WaitReloadEndTask)
+			{
+				EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+				return;
+			}
+			bWaitingForReload = true;
+			WaitReloadEndTask->Removed.AddDynamic(this, &ThisClass::HandleReloadEnded);
+			WaitReloadEndTask->ReadyForActivation();
+			return;
+		}
 	}
 
-	if (ActorInfo && ActorInfo->IsLocallyControlled())
-	{
-		BeginLocalFiring();
-	}
+	StartFiring();
 }
 
 void UStulWeaponFireAbility::EndAbility(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo, const bool bReplicateEndAbility, const bool bWasCancelled)
@@ -93,6 +109,11 @@ void UStulWeaponFireAbility::EndAbility(const FGameplayAbilitySpecHandle Handle,
 		WaitInputReleaseTask->EndTask();
 		WaitInputReleaseTask = nullptr;
 	}
+	if (WaitReloadEndTask)
+	{
+		WaitReloadEndTask->EndTask();
+		WaitReloadEndTask = nullptr;
+	}
 
 	if (bFiringStarted)
 	{
@@ -104,6 +125,8 @@ void UStulWeaponFireAbility::EndAbility(const FGameplayAbilitySpecHandle Handle,
 	}
 
 	bFiringStarted = false;
+	bWaitingForReload = false;
+	bCanUsePendingReloadAmmo = false;
 	ActiveFireMode = FGameplayTag();
 	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
 }
@@ -118,6 +141,10 @@ bool UStulWeaponFireAbility::CanActivateAbility(const FGameplayAbilitySpecHandle
 	const AStulWeapon* Weapon = ActorInfo ? Cast<AStulWeapon>(ActorInfo->AvatarActor.Get()) : nullptr;
 	const UStulWeaponDefinition* Definition = Weapon ? Weapon->GetWeaponDefinition() : nullptr;
 	if (!Definition)
+	{
+		return false;
+	}
+	if (Weapon->IsReloading() && Definition->ReloadType != EStulWeaponReloadType::Custom)
 	{
 		return false;
 	}
@@ -141,6 +168,10 @@ bool UStulWeaponFireAbility::CanActivateAbility(const FGameplayAbilitySpecHandle
 	}
 
 	const UWorld* World = GetWorld();
+	if (Weapon->IsReloading() && ActorInfo && ActorInfo->IsNetAuthority() && (!World || World->GetTimeSeconds() + KINDA_SMALL_NUMBER < EarliestNextAuthoritativeShotTime))
+	{
+		return false;
+	}
 	return !ActorInfo || !ActorInfo->IsLocallyControlled() || (World && World->GetTimeSeconds() + KINDA_SMALL_NUMBER >= EarliestNextLocalShotTime);
 }
 
@@ -148,6 +179,15 @@ bool UStulWeaponFireAbility::CheckCost(const FGameplayAbilitySpecHandle Handle, 
 {
 	const AStulWeapon* Weapon = ActorInfo ? Cast<AStulWeapon>(ActorInfo->AvatarActor.Get()) : nullptr;
 	const UStulWeaponAttributeSet* Attributes = Weapon ? Weapon->GetWeaponAttributeSet() : nullptr;
+	const UStulWeaponDefinition* Definition = Weapon ? Weapon->GetWeaponDefinition() : nullptr;
+	if (bCanUsePendingReloadAmmo && ActorInfo && ActorInfo->IsLocallyControlled() && !ActorInfo->IsNetAuthority())
+	{
+		return true;
+	}
+	if (Weapon && Weapon->IsReloading() && Definition && Definition->ReloadType == EStulWeaponReloadType::Custom && Attributes && Attributes->GetCurrentAmmo() + KINDA_SMALL_NUMBER < Attributes->GetMaxAmmo())
+	{
+		return true;
+	}
 	if (Attributes && Attributes->GetCurrentAmmo() + KINDA_SMALL_NUMBER >= FMath::Max(0.0f, Attributes->GetFireCost()))
 	{
 		return true;
@@ -183,6 +223,53 @@ void UStulWeaponFireAbility::ApplyCost(const FGameplayAbilitySpecHandle Handle, 
 /*********************************************************************************************/
 /************************************** Local Firing *****************************************/
 /*********************************************************************************************/
+
+bool UStulWeaponFireAbility::RequestCustomReloadInterruption(bool& bOutWaitForCurrentCycle)
+{
+	bOutWaitForCurrentCycle = false;
+	UAbilitySystemComponent* AbilitySystem = GetAbilitySystemComponentFromActorInfo();
+	if (!AbilitySystem)
+	{
+		return false;
+	}
+
+	FGameplayTagContainer ReloadAbilityTags(StulWeaponGameplayTags::Ability_Reload);
+	TArray<FGameplayAbilitySpec*> ReloadSpecs;
+	AbilitySystem->GetActivatableGameplayAbilitySpecsByAllMatchingTags(ReloadAbilityTags, ReloadSpecs, false);
+	for (const FGameplayAbilitySpec* ReloadSpec : ReloadSpecs)
+	{
+		if (!ReloadSpec || !ReloadSpec->IsActive())
+		{
+			continue;
+		}
+
+		for (UGameplayAbility* AbilityInstance : ReloadSpec->GetAbilityInstances())
+		{
+			if (UStulWeaponReloadAbility* ReloadAbility = Cast<UStulWeaponReloadAbility>(AbilityInstance))
+			{
+				if (ReloadAbility->RequestInterruptForFire(bOutWaitForCurrentCycle)) return true;
+			}
+		}
+	}
+
+	UE_LOG(LogStulWeaponSystem, Warning, TEXT("Fire ability '%s' could not find the active Custom reload ability to interrupt."), *GetNameSafe(this));
+	return false;
+}
+
+void UStulWeaponFireAbility::StartFiring()
+{
+	if (!IsActive() || bFiringStarted)
+	{
+		return;
+	}
+
+	bWaitingForReload = false;
+	bFiringStarted = true;
+	if (AStulWeapon* Weapon = GetStulWeapon()) Weapon->NotifyFiringStarted();
+	SendWeaponEvent(StulWeaponGameplayTags::Event_Fire_Start);
+	BindServerTargetData();
+	if (IsActive() && CurrentActorInfo && CurrentActorInfo->IsLocallyControlled()) BeginLocalFiring();
+}
 void UStulWeaponFireAbility::BeginLocalFiring()
 {
 	if (ActiveFireMode == StulWeaponGameplayTags::FireMode_Single)
@@ -260,6 +347,7 @@ bool UStulWeaponFireAbility::SubmitLocalShot()
 		const bool bAuthoritative = CurrentActorInfo && CurrentActorInfo->IsNetAuthority();
 		ExecuteShot(ViewData.ViewLocation, ViewDirection, NextLocalShotSequence, bAuthoritative);
 	}
+	bCanUsePendingReloadAmmo = false;
 
 	const float DelayAfterShot = GetDelayAfterCurrentLocalShot();
 	if (const UWorld* World = GetWorld())
@@ -343,10 +431,20 @@ float UStulWeaponFireAbility::GetDelayAfterCurrentLocalShot() const
 void UStulWeaponFireAbility::HandleInputReleased(const float TimeHeld)
 {
 	bInputReleased = true;
+	if (bWaitingForReload)
+	{
+		return;
+	}
 	if (ActiveFireMode == StulWeaponGameplayTags::FireMode_Automatic || (ActiveFireMode == StulWeaponGameplayTags::FireMode_Burst && ShotsRemainingInBurst <= 0 && AcceptedShotsInServerBurst == 0))
 	{
 		FinishFiring(false);
 	}
+}
+
+void UStulWeaponFireAbility::HandleReloadEnded()
+{
+	WaitReloadEndTask = nullptr;
+	StartFiring();
 }
 
 /*********************************************************************************************/
