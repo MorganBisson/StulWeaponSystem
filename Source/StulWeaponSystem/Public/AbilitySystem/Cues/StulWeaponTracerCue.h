@@ -6,6 +6,8 @@
 #include "GameplayCueNotify_Static.h"
 #include "StulWeaponTracerCue.generated.h"
 
+class AStulWeapon;
+
 /** Plays one pooled cosmetic Niagara tracer for a hitscan trajectory. */
 UCLASS()
 class STULWEAPONSYSTEM_API UStulWeaponTracerCue : public UGameplayCueNotify_Static
@@ -14,4 +16,11 @@ class STULWEAPONSYSTEM_API UStulWeaponTracerCue : public UGameplayCueNotify_Stat
 
 public:
 	virtual bool OnExecute_Implementation(AActor* MyTarget, const FGameplayCueParameters& Parameters) const override;
+
+private:
+	static bool ResolveTracerEndpoints(const AStulWeapon& Weapon, const FGameplayCueParameters& Parameters, FVector& OutStart, FVector& OutTarget);
+
+#if WITH_DEV_AUTOMATION_TESTS
+	friend class FStulWeaponHitscanTracerOriginTest;
+#endif
 };

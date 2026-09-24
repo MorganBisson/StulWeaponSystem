@@ -1,17 +1,24 @@
 #include "Weapons/StulWeapon.h"
 
+#include "Abilities/GameplayAbilityTargetTypes.h"
+#include "AbilitySystemBlueprintLibrary.h"
 #include "AbilitySystem/StulWeaponAbilitySystemComponent.h"
 #include "AbilitySystem/StulWeaponAttributeSet.h"
 #include "AbilitySystem/StulWeaponGameplayAbility.h"
+#include "Components/StulWeaponFireComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/AssetManager.h"
 #include "Engine/StreamableManager.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
 #include "GameplayAbilitySpec.h"
 #include "GameplayEffectTypes.h"
 #include "Net/UnrealNetwork.h"
+#include "Projectiles/StulWeaponProjectile.h"
 #include "StulWeaponGameplayTags.h"
 #include "StulWeaponSystem.h"
+#include "Weapons/Ammunition/StulAmmoDefinition.h"
 #include "Weapons/StulWeaponDefinition.h"
 
 /*********************************************************************************************/
@@ -34,6 +41,8 @@ AStulWeapon::AStulWeapon()
 
 	WeaponAttributeSet = CreateDefaultSubobject<UStulWeaponAttributeSet>(TEXT("WeaponAttributeSet"));
 	AbilitySystemComponent->AddAttributeSetSubobject(WeaponAttributeSet.Get());
+
+	FireComponent = CreateDefaultSubobject<UStulWeaponFireComponent>(TEXT("FireComponent"));
 }
 
 UAbilitySystemComponent* AStulWeapon::GetAbilitySystemComponent() const
@@ -41,36 +50,86 @@ UAbilitySystemComponent* AStulWeapon::GetAbilitySystemComponent() const
 	return AbilitySystemComponent;
 }
 
-void AStulWeapon::BeginPlay()
+UStulAmmoDefinition* AStulWeapon::GetCurrentAmmoDefinition() const
 {
-	Super::BeginPlay();
-	AbilitySystemComponent->RegisterGameplayTagEvent(StulWeaponGameplayTags::State_Aiming, EGameplayTagEventType::NewOrRemoved).AddUObject(this, &ThisClass::HandleAimStateTagChanged);
-	AbilitySystemComponent->RegisterGameplayTagEvent(StulWeaponGameplayTags::State_Reloading, EGameplayTagEventType::NewOrRemoved).AddUObject(this, &ThisClass::HandleReloadStateTagChanged);
-	AbilitySystemComponent->RegisterGameplayTagEvent(StulWeaponGameplayTags::State_ChangingFireMode, EGameplayTagEventType::NewOrRemoved).AddUObject(this, &ThisClass::HandleFireModeChangeStateTagChanged);
-	AbilitySystemComponent->GenericGameplayEventCallbacks.FindOrAdd(StulWeaponGameplayTags::Event_Reload_Commit).AddUObject(this, &ThisClass::HandleReloadGameplayEvent, StulWeaponGameplayTags::Event_Reload_Commit.GetTag());
-	AbilitySystemComponent->GenericGameplayEventCallbacks.FindOrAdd(StulWeaponGameplayTags::Event_Reload_Completed).AddUObject(this, &ThisClass::HandleReloadGameplayEvent, StulWeaponGameplayTags::Event_Reload_Completed.GetTag());
-	AbilitySystemComponent->GenericGameplayEventCallbacks.FindOrAdd(StulWeaponGameplayTags::Event_Reload_Cancelled).AddUObject(this, &ThisClass::HandleReloadGameplayEvent, StulWeaponGameplayTags::Event_Reload_Cancelled.GetTag());
+	return WeaponDefinition ? WeaponDefinition->DefaultAmmo.Get() : nullptr;
 }
 
 void AStulWeapon::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	CancelPendingLoads();
-	AbilitySystemComponent->RegisterGameplayTagEvent(StulWeaponGameplayTags::State_Aiming, EGameplayTagEventType::NewOrRemoved).RemoveAll(this);
-	AbilitySystemComponent->RegisterGameplayTagEvent(StulWeaponGameplayTags::State_Reloading, EGameplayTagEventType::NewOrRemoved).RemoveAll(this);
-	AbilitySystemComponent->RegisterGameplayTagEvent(StulWeaponGameplayTags::State_ChangingFireMode, EGameplayTagEventType::NewOrRemoved).RemoveAll(this);
-	AbilitySystemComponent->GenericGameplayEventCallbacks.FindOrAdd(StulWeaponGameplayTags::Event_Reload_Commit).RemoveAll(this);
-	AbilitySystemComponent->GenericGameplayEventCallbacks.FindOrAdd(StulWeaponGameplayTags::Event_Reload_Completed).RemoveAll(this);
-	AbilitySystemComponent->GenericGameplayEventCallbacks.FindOrAdd(StulWeaponGameplayTags::Event_Reload_Cancelled).RemoveAll(this);
-	AbilitySystemComponent->ClearAbilityInput();
+	ClearPredictedProjectiles();
 	ClearGrantedAbilities();
-
-	if (AbilitySystemComponent && bAbilityActorInfoInitialized)
-	{
-		AbilitySystemComponent->ClearActorInfo();
-		bAbilityActorInfoInitialized = false;
-	}
+	UninitializeAbilitySystem();
 
 	Super::EndPlay(EndPlayReason);
+}
+
+void AStulWeapon::HandleGameplayCue(UObject* Self, const FGameplayTag GameplayCueTag, const EGameplayCueEvent::Type EventType, const FGameplayCueParameters& Parameters)
+{
+	const bool bStateActivated = EventType == EGameplayCueEvent::OnActive || EventType == EGameplayCueEvent::WhileActive;
+	if (GameplayCueTag == StulWeaponGameplayTags::GameplayCue_Aim || GameplayCueTag == StulWeaponGameplayTags::GameplayCue_Reload || GameplayCueTag == StulWeaponGameplayTags::GameplayCue_ChangeFireMode)
+	{
+		if (bStateActivated || EventType == EGameplayCueEvent::Removed) SetPresentationCueActive(GameplayCueTag, bStateActivated);
+		return;
+	}
+
+	if (EventType == EGameplayCueEvent::Executed)
+	{
+		if (GameplayCueTag == StulWeaponGameplayTags::GameplayCue_ReloadCommit)
+		{
+			OnReloadCommit.Broadcast(this, FMath::Max(0, FMath::RoundToInt(Parameters.RawMagnitude)));
+			return;
+		}
+		if (GameplayCueTag == StulWeaponGameplayTags::GameplayCue_ReloadCompleted)
+		{
+			OnReloadCompleted.Broadcast(this);
+			return;
+		}
+		if (GameplayCueTag == StulWeaponGameplayTags::GameplayCue_ReloadCancelled)
+		{
+			OnReloadCancelled.Broadcast(this);
+			return;
+		}
+	}
+
+	IGameplayCueInterface::HandleGameplayCue(Self, GameplayCueTag, EventType, Parameters);
+}
+
+void AStulWeapon::SetPresentationCueActive(const FGameplayTag GameplayCueTag, const bool bActive)
+{
+	const bool bWasActive = ActivePresentationCues.HasTagExact(GameplayCueTag);
+	if (bWasActive == bActive) return;
+
+	if (bActive) ActivePresentationCues.AddTag(GameplayCueTag);
+	else ActivePresentationCues.RemoveTag(GameplayCueTag);
+
+	if (GameplayCueTag == StulWeaponGameplayTags::GameplayCue_Aim)
+	{
+		SetAimPresentationActive(bActive);
+	}
+	else if (GameplayCueTag == StulWeaponGameplayTags::GameplayCue_Reload)
+	{
+		if (bActive) OnReloadStarted.Broadcast(this);
+	}
+	else if (GameplayCueTag == StulWeaponGameplayTags::GameplayCue_ChangeFireMode)
+	{
+		OnFireModeChangeStateChanged.Broadcast(this, bActive);
+	}
+}
+
+bool AStulWeapon::HasPresentationOrGameplayState(const FGameplayTag GameplayStateTag, const FGameplayTag PresentationCueTag) const
+{
+	return ActivePresentationCues.HasTagExact(PresentationCueTag) || (AbilitySystemComponent && AbilitySystemComponent->HasMatchingGameplayTag(GameplayStateTag));
+}
+
+void AStulWeapon::SetOwner(AActor* NewOwner)
+{
+	if (GetOwner() == NewOwner) return;
+
+	UninitializeAbilitySystem();
+	Super::SetOwner(NewOwner);
+	if (bInitializationStarted && IsValid(NewOwner)) InitializeAbilityActorInfo();
 }
 
 void AStulWeapon::OnRep_Owner()
@@ -82,10 +141,9 @@ void AStulWeapon::OnRep_Owner()
 	{
 		InitializeAbilityActorInfo();
 	}
-	else if (bAbilityActorInfoInitialized)
+	else
 	{
-		AbilitySystemComponent->ClearActorInfo();
-		bAbilityActorInfoInitialized = false;
+		UninitializeAbilitySystem();
 		bInitialized = false;
 	}
 }
@@ -96,6 +154,7 @@ void AStulWeapon::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 
 	DOREPLIFETIME(AStulWeapon, WeaponDefinitionId);
 	DOREPLIFETIME_CONDITION_NOTIFY(AStulWeapon, CurrentFireModeTag, COND_None, REPNOTIFY_Always);
+	DOREPLIFETIME_CONDITION_NOTIFY(AStulWeapon, WeaponBallisticSeed, COND_OwnerOnly, REPNOTIFY_Always);
 }
 
 /*********************************************************************************************/
@@ -153,6 +212,8 @@ bool AStulWeapon::BeginInitializationRequest()
 	}
 
 	bInitializationStarted = true;
+	WeaponBallisticSeed = HashCombineFast(GetTypeHash(GetUniqueID()), GetTypeHash(static_cast<uint64>(FPlatformTime::Cycles64())));
+	if (WeaponBallisticSeed == 0) WeaponBallisticSeed = 1;
 	InitializeAbilityActorInfo();
 	return true;
 }
@@ -165,7 +226,12 @@ bool AStulWeapon::InitializeFromResolvedDefinition(UStulWeaponDefinition* InDefi
 		return false;
 	}
 
-	if (InDefinition->AvailableFireModes.IsEmpty() || !InDefinition->DefaultFireModeTag.IsValid() || !InDefinition->AvailableFireModes.HasTagExact(InDefinition->DefaultFireModeTag))
+	bool bHasOnlySupportedFireModes = true;
+	for (const FGameplayTag FireMode : InDefinition->AvailableFireModes)
+	{
+		bHasOnlySupportedFireModes &= StulWeaponGameplayTags::IsSupportedFireMode(FireMode);
+	}
+	if (InDefinition->AvailableFireModes.IsEmpty() || !bHasOnlySupportedFireModes || !StulWeaponGameplayTags::IsSupportedFireMode(InDefinition->DefaultFireModeTag) || !InDefinition->AvailableFireModes.HasTagExact(InDefinition->DefaultFireModeTag))
 	{
 		FailInitialization(NSLOCTEXT(
 			"StulWeaponSystem",
@@ -284,14 +350,67 @@ void AStulWeapon::InitializeAbilityActorInfo()
 		return;
 	}
 
-	// The ASC initially sees its component owner (the weapon) during registration.
-	// Clearing first guarantees that InitAbilityActorInfo treats the weapon as a newly assigned avatar
-	// and dispatches OnAvatarSet after the logical owner is known.
-	AbilitySystemComponent->ClearActorInfo();
+	if (bAbilityActorInfoInitialized && AbilitySystemComponent->GetOwnerActor() == AbilityOwner && AbilitySystemComponent->GetAvatarActor() == this)
+	{
+		AbilitySystemComponent->RefreshAbilityActorInfo();
+		RefreshNetworkRoleFromOwner();
+		TryFinishInitialization();
+		return;
+	}
+
+	UninitializeAbilitySystem();
+	if (APawn* AbilityOwnerPawn = Cast<APawn>(AbilityOwner))
+	{
+		BoundAbilityOwnerPawn = AbilityOwnerPawn;
+		AbilityOwnerPawn->ReceiveControllerChangedDelegate.AddUniqueDynamic(this, &ThisClass::HandleOwnerControllerChanged);
+	}
+	RefreshNetworkRoleFromOwner();
+
 	AbilitySystemComponent->InitAbilityActorInfo(AbilityOwner, this);
 	bAbilityActorInfoInitialized = true;
 	UE_LOG(LogStulWeaponSystem, Verbose, TEXT("Weapon '%s' initialized GAS actor info with owner '%s' and avatar '%s'."), *GetNameSafe(this), *GetNameSafe(AbilityOwner), *GetNameSafe(this));
 	TryFinishInitialization();
+}
+
+void AStulWeapon::UninitializeAbilitySystem()
+{
+	if (APawn* AbilityOwnerPawn = BoundAbilityOwnerPawn.Get()) AbilityOwnerPawn->ReceiveControllerChangedDelegate.RemoveDynamic(this, &ThisClass::HandleOwnerControllerChanged);
+	BoundAbilityOwnerPawn.Reset();
+
+	if (!bAbilityActorInfoInitialized || !AbilitySystemComponent)
+	{
+		bAbilityActorInfoInitialized = false;
+		return;
+	}
+
+	if (AbilitySystemComponent->GetAvatarActor() == this)
+	{
+		AbilitySystemComponent->CancelAbilities();
+		AbilitySystemComponent->ClearAbilityInput();
+		AbilitySystemComponent->RemoveAllGameplayCues();
+		if (AbilitySystemComponent->GetOwnerActor()) AbilitySystemComponent->SetAvatarActor(nullptr);
+		else AbilitySystemComponent->ClearActorInfo();
+	}
+	ActivePresentationCues.Reset();
+	ResetAimState();
+	bAbilityActorInfoInitialized = false;
+}
+
+void AStulWeapon::RefreshNetworkRoleFromOwner()
+{
+	if (!HasAuthority()) return;
+	const APawn* OwnerPawn = Cast<APawn>(GetOwner());
+	const APlayerController* OwnerPlayerController = OwnerPawn ? Cast<APlayerController>(OwnerPawn->GetController()) : nullptr;
+	SetAutonomousProxy(OwnerPlayerController && !OwnerPlayerController->IsLocalController());
+}
+
+void AStulWeapon::HandleOwnerControllerChanged(APawn* Pawn, AController* /*OldController*/, AController* /*NewController*/)
+{
+	if (Pawn != GetOwner()) return;
+	CancelActiveActions();
+	RefreshNetworkRoleFromOwner();
+	if (bAbilityActorInfoInitialized && AbilitySystemComponent && AbilitySystemComponent->GetAvatarActor() == this) AbilitySystemComponent->RefreshAbilityActorInfo();
+	else InitializeAbilityActorInfo();
 }
 
 void AStulWeapon::TryFinishInitialization()
@@ -320,6 +439,19 @@ void AStulWeapon::CancelPendingLoads()
 		RuntimeAssetsLoadHandle->CancelHandle();
 	}
 	RuntimeAssetsLoadHandle.Reset();
+}
+
+void AStulWeapon::CollectRuntimeAssetPaths(TArray<FSoftObjectPath>& OutPaths) const
+{
+	OutPaths.Reset();
+	if (!WeaponDefinition) return;
+
+	WeaponDefinition->GetGameplayAssetPaths(OutPaths);
+	if (GetNetMode() == NM_DedicatedServer) return;
+
+	TArray<FSoftObjectPath> PresentationAssetPaths;
+	WeaponDefinition->GetPresentationAssetPaths(PresentationAssetPaths);
+	for (const FSoftObjectPath& AssetPath : PresentationAssetPaths) OutPaths.AddUnique(AssetPath);
 }
 
 /*********************************************************************************************/
@@ -385,7 +517,7 @@ void AStulWeapon::GrantDefinitionAbilities()
 			continue;
 		}
 
-		FGameplayAbilitySpec AbilitySpec(Mapping.AbilityClass, FMath::Max(1, Mapping.AbilityLevel), INDEX_NONE, this);
+		FGameplayAbilitySpec AbilitySpec(Mapping.AbilityClass, FMath::Max(1, Mapping.AbilityLevel));
 		if (Mapping.InputTag.IsValid())
 		{
 			AbilitySpec.GetDynamicSpecSourceTags().AddTag(Mapping.InputTag);
@@ -428,16 +560,7 @@ bool AStulWeapon::BeginRuntimeAssetLoad()
 	}
 
 	TArray<FSoftObjectPath> RuntimeAssetPaths;
-	WeaponDefinition->GetGameplayAssetPaths(RuntimeAssetPaths);
-	if (GetNetMode() != NM_DedicatedServer)
-	{
-		TArray<FSoftObjectPath> PresentationAssetPaths;
-		WeaponDefinition->GetPresentationAssetPaths(PresentationAssetPaths);
-		for (const FSoftObjectPath& AssetPath : PresentationAssetPaths)
-		{
-			RuntimeAssetPaths.AddUnique(AssetPath);
-		}
-	}
+	CollectRuntimeAssetPaths(RuntimeAssetPaths);
 
 	if (RuntimeAssetPaths.IsEmpty())
 	{
@@ -476,16 +599,7 @@ void AStulWeapon::FinishRuntimeAssetLoad()
 	}
 
 	TArray<FSoftObjectPath> RuntimeAssetPaths;
-	WeaponDefinition->GetGameplayAssetPaths(RuntimeAssetPaths);
-	if (GetNetMode() != NM_DedicatedServer)
-	{
-		TArray<FSoftObjectPath> PresentationAssetPaths;
-		WeaponDefinition->GetPresentationAssetPaths(PresentationAssetPaths);
-		for (const FSoftObjectPath& AssetPath : PresentationAssetPaths)
-		{
-			RuntimeAssetPaths.AddUnique(AssetPath);
-		}
-	}
+	CollectRuntimeAssetPaths(RuntimeAssetPaths);
 	for (const FSoftObjectPath& AssetPath : RuntimeAssetPaths)
 	{
 		if (!AssetPath.ResolveObject())
@@ -614,7 +728,7 @@ FTransform AStulWeapon::GetAimTransform_Implementation() const
 
 bool AStulWeapon::IsAiming() const
 {
-	return AbilitySystemComponent && AbilitySystemComponent->HasMatchingGameplayTag(StulWeaponGameplayTags::State_Aiming);
+	return HasPresentationOrGameplayState(StulWeaponGameplayTags::State_Aiming, StulWeaponGameplayTags::GameplayCue_Aim);
 }
 
 float AStulWeapon::GetAimAlpha() const
@@ -637,6 +751,7 @@ bool AStulWeapon::IsFullyAimed() const
 void AStulWeapon::CancelActiveActions()
 {
 	ClearAbilityInput();
+	if (FireComponent) FireComponent->InterruptActiveSession();
 	if (AbilitySystemComponent)
 	{
 		FGameplayTagContainer ActionTags;
@@ -646,14 +761,17 @@ void AStulWeapon::CancelActiveActions()
 		ActionTags.AddTag(StulWeaponGameplayTags::Ability_ChangeFireMode);
 		AbilitySystemComponent->CancelAbilities(&ActionTags);
 	}
+	ClearPredictedProjectiles();
 	ResetAimState();
 }
 
-void AStulWeapon::HandleAimStateTagChanged(const FGameplayTag /*CallbackTag*/, const int32 NewCount)
+void AStulWeapon::SetAimPresentationActive(const bool bActive)
 {
-	const bool bNewAiming = NewCount > 0;
-	BeginAimTransition(bNewAiming);
-	OnAimStateChanged.Broadcast(this, bNewAiming);
+	const float TargetAlpha = bActive ? 1.0f : 0.0f;
+	if (FMath::IsNearlyEqual(AimTransitionTargetAlpha, TargetAlpha)) return;
+
+	BeginAimTransition(bActive);
+	OnAimStateChanged.Broadcast(this, bActive);
 }
 
 void AStulWeapon::BeginAimTransition(const bool bNewAiming)
@@ -678,105 +796,12 @@ void AStulWeapon::ResetAimState()
 
 bool AStulWeapon::IsReloading() const
 {
-	return AbilitySystemComponent && AbilitySystemComponent->HasMatchingGameplayTag(StulWeaponGameplayTags::State_Reloading);
-}
-
-void AStulWeapon::HandleReloadStateTagChanged(const FGameplayTag /*CallbackTag*/, const int32 NewCount)
-{
-	if (NewCount > 0) OnReloadStarted.Broadcast(this);
-}
-
-void AStulWeapon::HandleReloadGameplayEvent(const FGameplayEventData* Payload, const FGameplayTag EventTag)
-{
-	if (EventTag == StulWeaponGameplayTags::Event_Reload_Commit)
-	{
-		const int32 AmmoRestored = Payload ? FMath::Max(0, FMath::RoundToInt(Payload->EventMagnitude)) : 0;
-		OnReloadCommit.Broadcast(this, AmmoRestored);
-	}
-	else if (EventTag == StulWeaponGameplayTags::Event_Reload_Completed)
-	{
-		OnReloadCompleted.Broadcast(this);
-	}
-	else if (EventTag == StulWeaponGameplayTags::Event_Reload_Cancelled)
-	{
-		OnReloadCancelled.Broadcast(this);
-	}
+	return HasPresentationOrGameplayState(StulWeaponGameplayTags::State_Reloading, StulWeaponGameplayTags::GameplayCue_Reload);
 }
 
 /*********************************************************************************************/
 /************************************** Fire Mode ********************************************/
 /*********************************************************************************************/
-
-bool AStulWeapon::SetCurrentFireMode(const FGameplayTag NewFireMode)
-{
-	if (!HasAuthority())
-	{
-		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon '%s' rejected fire mode '%s': fire modes must be changed on the server."), *GetNameSafe(this), *NewFireMode.ToString());
-		return false;
-	}
-	if (IsReloading())
-	{
-		UE_LOG(LogStulWeaponSystem, Verbose, TEXT("Weapon '%s' rejected fire mode '%s' while reloading."), *GetNameSafe(this), *NewFireMode.ToString());
-		return false;
-	}
-
-	if (!WeaponDefinition || !WeaponDefinition->AvailableFireModes.HasTagExact(NewFireMode))
-	{
-		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon '%s' rejected unavailable fire mode '%s' for definition '%s'."), *GetNameSafe(this), *NewFireMode.ToString(), *GetNameSafe(WeaponDefinition));
-		return false;
-	}
-
-	if (CurrentFireModeTag == NewFireMode)
-	{
-		return true;
-	}
-
-	const FGameplayTag PreviousFireMode = CurrentFireModeTag;
-	CurrentFireModeTag = NewFireMode;
-	AuthoritativeFireModeTag = NewFireMode;
-	RuntimeInstanceData.CurrentFireModeTag = NewFireMode;
-	OnFireModeChanged.Broadcast(PreviousFireMode, CurrentFireModeTag);
-	ForceNetUpdate();
-	return true;
-}
-
-bool AStulWeapon::CycleFireMode()
-{
-	if (IsReloading() || IsChangingFireMode())
-	{
-		return false;
-	}
-
-	if (!HasAuthority())
-	{
-		if (!HasLocalNetOwner())
-		{
-			UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon '%s' rejected CycleFireMode: only its owning client may send this request."), *GetNameSafe(this));
-			return false;
-		}
-
-		ServerCycleFireMode();
-		return true;
-	}
-
-	if (!WeaponDefinition)
-	{
-		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon '%s' cannot cycle fire mode because its definition is missing."), *GetNameSafe(this));
-		return false;
-	}
-
-	if (WeaponDefinition->AvailableFireModes.IsEmpty())
-	{
-		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon definition '%s' has no available fire mode."), *GetNameSafe(WeaponDefinition));
-		return false;
-	}
-
-	FGameplayTag NextFireMode;
-	if (GetNextFireMode(NextFireMode)) return SetCurrentFireMode(NextFireMode);
-
-	UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon definition '%s' contains no fire mode supported by CycleFireMode."), *GetNameSafe(WeaponDefinition));
-	return false;
-}
 
 bool AStulWeapon::GetNextFireMode(FGameplayTag& OutFireMode) const
 {
@@ -786,14 +811,16 @@ bool AStulWeapon::GetNextFireMode(FGameplayTag& OutFireMode) const
 		return false;
 	}
 
-	static const TArray<FGameplayTag> FireModeCycle =
+	const TConstArrayView<FGameplayTag> FireModeCycle = StulWeaponGameplayTags::GetSupportedFireModeCycle();
+	int32 CurrentIndex = INDEX_NONE;
+	for (int32 Index = 0; Index < FireModeCycle.Num(); ++Index)
 	{
-		StulWeaponGameplayTags::FireMode_Single,
-		StulWeaponGameplayTags::FireMode_Burst,
-		StulWeaponGameplayTags::FireMode_Automatic
-	};
-
-	const int32 CurrentIndex = FireModeCycle.IndexOfByKey(CurrentFireModeTag);
+		if (FireModeCycle[Index] == CurrentFireModeTag)
+		{
+			CurrentIndex = Index;
+			break;
+		}
+	}
 	for (int32 Offset = 1; Offset <= FireModeCycle.Num(); ++Offset)
 	{
 		const FGameplayTag Candidate = FireModeCycle[(CurrentIndex + Offset + FireModeCycle.Num()) % FireModeCycle.Num()];
@@ -808,19 +835,27 @@ bool AStulWeapon::GetNextFireMode(FGameplayTag& OutFireMode) const
 
 bool AStulWeapon::IsChangingFireMode() const
 {
-	return AbilitySystemComponent && AbilitySystemComponent->HasMatchingGameplayTag(StulWeaponGameplayTags::State_ChangingFireMode);
+	return HasPresentationOrGameplayState(StulWeaponGameplayTags::State_ChangingFireMode, StulWeaponGameplayTags::GameplayCue_ChangeFireMode);
 }
 
 bool AStulWeapon::CommitFireModeChange(const FGameplayTag NewFireMode)
 {
-	if (HasAuthority()) return SetCurrentFireMode(NewFireMode);
-	if (!HasLocalNetOwner() || IsReloading() || !WeaponDefinition || !WeaponDefinition->AvailableFireModes.HasTagExact(NewFireMode)) return false;
-	return ApplyPredictedFireMode(NewFireMode);
+	if (IsReloading() || !WeaponDefinition || !StulWeaponGameplayTags::IsSupportedFireMode(NewFireMode) || !WeaponDefinition->AvailableFireModes.HasTagExact(NewFireMode)) return false;
+	if (!HasAuthority()) return HasLocalNetOwner() && ApplyPredictedFireMode(NewFireMode);
+	if (CurrentFireModeTag == NewFireMode) return true;
+
+	const FGameplayTag PreviousFireMode = CurrentFireModeTag;
+	CurrentFireModeTag = NewFireMode;
+	AuthoritativeFireModeTag = NewFireMode;
+	RuntimeInstanceData.CurrentFireModeTag = NewFireMode;
+	OnFireModeChanged.Broadcast(PreviousFireMode, CurrentFireModeTag);
+	ForceNetUpdate();
+	return true;
 }
 
 bool AStulWeapon::ApplyPredictedFireMode(const FGameplayTag NewFireMode)
 {
-	if (HasAuthority() || !HasLocalNetOwner() || !WeaponDefinition || !WeaponDefinition->AvailableFireModes.HasTagExact(NewFireMode)) return false;
+	if (HasAuthority() || !HasLocalNetOwner() || !WeaponDefinition || !StulWeaponGameplayTags::IsSupportedFireMode(NewFireMode) || !WeaponDefinition->AvailableFireModes.HasTagExact(NewFireMode)) return false;
 	if (CurrentFireModeTag == NewFireMode) return true;
 
 	const FGameplayTag PreviousFireMode = CurrentFireModeTag;
@@ -833,16 +868,6 @@ bool AStulWeapon::ApplyPredictedFireMode(const FGameplayTag NewFireMode)
 bool AStulWeapon::RestoreAuthoritativeFireMode()
 {
 	return AuthoritativeFireModeTag.IsValid() && ApplyPredictedFireMode(AuthoritativeFireModeTag);
-}
-
-void AStulWeapon::HandleFireModeChangeStateTagChanged(const FGameplayTag /*CallbackTag*/, const int32 NewCount)
-{
-	OnFireModeChangeStateChanged.Broadcast(this, NewCount > 0);
-}
-
-void AStulWeapon::ServerCycleFireMode_Implementation()
-{
-	CycleFireMode();
 }
 
 /*********************************************************************************************/
@@ -893,19 +918,121 @@ void AStulWeapon::ClearAbilityInput()
 /*********************************************************************************************/
 /**************************************** Shooting *******************************************/
 /*********************************************************************************************/
-void AStulWeapon::NotifyFiringStarted()
+void AStulWeapon::HandleFiringStarted()
 {
-	OnFiringStarted.Broadcast(this);
+	if (HasLocalNetOwner()) OnLocalFiringStarted.Broadcast(this);
 }
 
-void AStulWeapon::NotifyShotExecuted(const FStulWeaponShotResult& ShotResult)
+void AStulWeapon::HandleShotExecuted(const FStulWeaponShotExecution& ShotExecution)
 {
-	OnShotExecuted.Broadcast(this, ShotResult);
+	if (HasLocalNetOwner()) 
+		OnLocalShotExecuted.Broadcast(this, ShotExecution);
+	
+	if (ShotExecution.Results.IsEmpty()) 
+		return;
+
+	ExecuteFireGameplayCue(ShotExecution.Results[0]);
+	if (WeaponDefinition && WeaponDefinition->ShotType == EStulWeaponShotType::Hitscan)
+	{
+		for (const FStulWeaponShotResult& ShotResult : ShotExecution.Results)
+		{
+			ExecuteTracerGameplayCue(ShotResult);
+		}
+	}
 }
 
-void AStulWeapon::NotifyFiringEnded()
+void AStulWeapon::HandleFiringEnded()
 {
-	OnFiringEnded.Broadcast(this);
+	if (HasLocalNetOwner()) OnLocalFiringEnded.Broadcast(this);
+}
+
+void AStulWeapon::RegisterPredictedProjectile(const FStulProjectileId& ProjectileId, AStulWeaponProjectile* Projectile)
+{
+	if (!HasLocalNetOwner() || !ProjectileId.IsValid() || !IsValid(Projectile)) return;
+
+	if (TWeakObjectPtr<AStulWeaponProjectile>* ExistingProjectile = PredictedProjectiles.Find(ProjectileId))
+	{
+		if (AStulWeaponProjectile* Existing = ExistingProjectile->Get()) Existing->Destroy();
+	}
+	PredictedProjectiles.Add(ProjectileId, Projectile);
+}
+
+AStulWeaponProjectile* AStulWeapon::FindPredictedProjectile(const FStulProjectileId& ProjectileId) const
+{
+	if (!ProjectileId.IsValid()) return nullptr;
+	const TWeakObjectPtr<AStulWeaponProjectile>* Projectile = PredictedProjectiles.Find(ProjectileId);
+	return Projectile ? Projectile->Get() : nullptr;
+}
+
+void AStulWeapon::ConfirmPredictedShot(const FStulShotId& ShotId)
+{
+	for (const TPair<FStulProjectileId, TWeakObjectPtr<AStulWeaponProjectile>>& Pair : PredictedProjectiles)
+	{
+		if (Pair.Key.ShotId == ShotId)
+		{
+			if (AStulWeaponProjectile* Projectile = Pair.Value.Get()) Projectile->ConfirmPrediction();
+		}
+	}
+}
+
+void AStulWeapon::RejectPredictedShot(const FStulShotId& ShotId)
+{
+	TArray<FStulProjectileId> RejectedProjectileIds;
+	for (const TPair<FStulProjectileId, TWeakObjectPtr<AStulWeaponProjectile>>& Pair : PredictedProjectiles)
+	{
+		if (Pair.Key.ShotId == ShotId) RejectedProjectileIds.Add(Pair.Key);
+	}
+	for (const FStulProjectileId& ProjectileId : RejectedProjectileIds)
+	{
+		TWeakObjectPtr<AStulWeaponProjectile> Projectile;
+		PredictedProjectiles.RemoveAndCopyValue(ProjectileId, Projectile);
+		if (AStulWeaponProjectile* RejectedProjectile = Projectile.Get()) RejectedProjectile->Destroy();
+	}
+}
+
+void AStulWeapon::UnregisterPredictedProjectile(const FStulProjectileId& ProjectileId, const AStulWeaponProjectile* Projectile)
+{
+	const TWeakObjectPtr<AStulWeaponProjectile>* RegisteredProjectile = PredictedProjectiles.Find(ProjectileId);
+	if (RegisteredProjectile && RegisteredProjectile->Get() == Projectile) PredictedProjectiles.Remove(ProjectileId);
+}
+
+void AStulWeapon::ClearPredictedProjectiles()
+{
+	TArray<TWeakObjectPtr<AStulWeaponProjectile>> Projectiles;
+	PredictedProjectiles.GenerateValueArray(Projectiles);
+	PredictedProjectiles.Reset();
+	for (const TWeakObjectPtr<AStulWeaponProjectile>& Projectile : Projectiles)
+	{
+		if (AStulWeaponProjectile* PredictedProjectile = Projectile.Get()) PredictedProjectile->Destroy();
+	}
+}
+
+void AStulWeapon::HandleAuthoritativeHit(const FHitResult& HitResult, const float Damage, AActor* EffectCauser, UStulAmmoDefinition* AmmoDefinition, const bool bExecutePresentation)
+{
+	if (!HasAuthority())
+	{
+		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon '%s' rejected a non-authoritative hit."), *GetNameSafe(this));
+		return;
+	}
+
+	UStulAmmoDefinition* ImpactAmmo = AmmoDefinition ? AmmoDefinition : GetCurrentAmmoDefinition();
+	AActor* ResolvedEffectCauser = EffectCauser ? EffectCauser : this;
+	if (bExecutePresentation) ExecuteImpactGameplayCue(HitResult, Damage, ResolvedEffectCauser, ImpactAmmo);
+
+	AActor* HitActor = HitResult.GetActor();
+	if (UAbilitySystemComponent* HitAbilitySystem = UAbilitySystemBlueprintLibrary::GetAbilitySystemComponent(HitActor))
+	{
+		FGameplayEventData HitEventData;
+		HitEventData.EventTag = StulWeaponGameplayTags::Event_Hit;
+		HitEventData.Instigator = GetOwner();
+		HitEventData.Target = HitActor;
+		HitEventData.OptionalObject = this;
+		HitEventData.EventMagnitude = FMath::Max(0.0f, Damage);
+		HitEventData.TargetData.Add(new FGameplayAbilityTargetData_SingleTargetHit(HitResult));
+		HitAbilitySystem->HandleGameplayEvent(StulWeaponGameplayTags::Event_Hit, &HitEventData);
+	}
+
+	OnAuthoritativeHit.Broadcast(this, HitResult, FMath::Max(0.0f, Damage), ResolvedEffectCauser, ImpactAmmo);
 }
 
 void AStulWeapon::ExecuteFireGameplayCue(const FStulWeaponShotResult& ShotResult)
@@ -922,7 +1049,7 @@ void AStulWeapon::ExecuteFireGameplayCue(const FStulWeaponShotResult& ShotResult
 	CueParameters.Instigator = GetOwner();
 	CueParameters.EffectCauser = this;
 	CueParameters.SourceObject = WeaponDefinition;
-	AbilitySystemComponent->ExecuteGameplayCue(StulWeaponGameplayTags::GameplayCue_Fire, CueParameters);
+	AbilitySystemComponent->InvokeGameplayCueEvent(StulWeaponGameplayTags::GameplayCue_Fire, EGameplayCueEvent::Executed, CueParameters);
 }
 
 void AStulWeapon::ExecuteTracerGameplayCue(const FStulWeaponShotResult& ShotResult)
@@ -942,16 +1069,21 @@ void AStulWeapon::ExecuteTracerGameplayCue(const FStulWeaponShotResult& ShotResu
 
 	FGameplayCueParameters CueParameters(EffectContext);
 	CueParameters.Location = ShotResult.MuzzleLocation;
-	const FVector CosmeticPath = FVector(ShotResult.EndLocation) - FVector(ShotResult.MuzzleLocation);
+	FVector CosmeticEnd = FVector(ShotResult.EndLocation);
+	if (ShotResult.bBlockingHit && ShotResult.HitResult.bBlockingHit)
+	{
+		CosmeticEnd = FVector(ShotResult.HitResult.ImpactPoint);
+	}
+	const FVector CosmeticPath = CosmeticEnd - FVector(ShotResult.MuzzleLocation);
 	CueParameters.Normal = CosmeticPath.GetSafeNormal();
 	CueParameters.RawMagnitude = CosmeticPath.Length();
 	CueParameters.Instigator = GetOwner();
 	CueParameters.EffectCauser = this;
 	CueParameters.SourceObject = WeaponDefinition;
-	AbilitySystemComponent->ExecuteGameplayCue(StulWeaponGameplayTags::GameplayCue_Tracer, CueParameters);
+	AbilitySystemComponent->InvokeGameplayCueEvent(StulWeaponGameplayTags::GameplayCue_Tracer, EGameplayCueEvent::Executed, CueParameters);
 }
 
-void AStulWeapon::ExecuteImpactGameplayCue(const FHitResult& HitResult, const float Damage, AActor* EffectCauser)
+void AStulWeapon::ExecuteImpactGameplayCue(const FHitResult& HitResult, const float Damage, AActor* EffectCauser, UStulAmmoDefinition* AmmoDefinition)
 {
 	if (!AbilitySystemComponent)
 	{
@@ -959,8 +1091,9 @@ void AStulWeapon::ExecuteImpactGameplayCue(const FHitResult& HitResult, const fl
 		return;
 	}
 
+	UStulAmmoDefinition* ImpactAmmo = AmmoDefinition ? AmmoDefinition : GetCurrentAmmoDefinition();
 	FGameplayEffectContextHandle EffectContext = AbilitySystemComponent->MakeEffectContext();
-	EffectContext.AddSourceObject(WeaponDefinition);
+	EffectContext.AddSourceObject(ImpactAmmo);
 	EffectContext.AddHitResult(HitResult, true);
 
 	FGameplayCueParameters CueParameters(EffectContext);
@@ -969,9 +1102,9 @@ void AStulWeapon::ExecuteImpactGameplayCue(const FHitResult& HitResult, const fl
 	CueParameters.RawMagnitude = FMath::Max(0.0f, Damage);
 	CueParameters.Instigator = GetOwner();
 	CueParameters.EffectCauser = EffectCauser ? EffectCauser : this;
-	CueParameters.SourceObject = WeaponDefinition;
+	CueParameters.SourceObject = ImpactAmmo;
 	CueParameters.PhysicalMaterial = HitResult.PhysMaterial.Get();
-	AbilitySystemComponent->ExecuteGameplayCue(StulWeaponGameplayTags::GameplayCue_Impact, CueParameters);
+	AbilitySystemComponent->InvokeGameplayCueEvent(StulWeaponGameplayTags::GameplayCue_Impact, EGameplayCueEvent::Executed, CueParameters);
 }
 
 /*********************************************************************************************/
@@ -1026,4 +1159,9 @@ void AStulWeapon::OnRep_CurrentFireModeTag(const FGameplayTag& PreviousFireMode)
 {
 	AuthoritativeFireModeTag = CurrentFireModeTag;
 	if (PreviousFireMode != CurrentFireModeTag) OnFireModeChanged.Broadcast(PreviousFireMode, CurrentFireModeTag);
+}
+
+void AStulWeapon::OnRep_WeaponBallisticSeed()
+{
+	if (WeaponBallisticSeed == 0) UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon '%s' received an invalid ballistic seed."), *GetNameSafe(this));
 }

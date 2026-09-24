@@ -1,16 +1,15 @@
 #include "Projectiles/StulWeaponProjectile.h"
 
-#include "Abilities/GameplayAbilityTargetTypes.h"
-#include "AbilitySystemBlueprintLibrary.h"
-#include "AbilitySystemComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Components/SphereComponent.h"
+#include "Components/StulWeaponFireComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/CollisionProfile.h"
 #include "GameFramework/ProjectileMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "Projectiles/ProjectileVisualComponent.h"
-#include "StulWeaponGameplayTags.h"
 #include "StulWeaponSystem.h"
+#include "Weapons/Ammunition/StulAmmoDefinition.h"
 #include "Weapons/StulWeapon.h"
 
 AStulWeaponProjectile::AStulWeaponProjectile()
@@ -48,6 +47,11 @@ void AStulWeaponProjectile::BeginPlay()
 {
 	Super::BeginPlay();
 
+	if (InstanceMode == EInstanceMode::Uninitialized && !HasAuthority())
+	{
+		InstanceMode = EInstanceMode::Simulated;
+		bInitialized = true;
+	}
 	if (!InitData.IsValid())
 	{
 		UE_LOG(LogStulWeaponSystem, Error, TEXT("Projectile '%s' began play with invalid initialization data."), *GetNameSafe(this));
@@ -58,18 +62,44 @@ void AStulWeaponProjectile::BeginPlay()
 		return;
 	}
 
-	CollisionComponent->SetCollisionEnabled(HasAuthority() ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+	CollisionComponent->SetCollisionEnabled(InstanceMode == EInstanceMode::Authoritative || InstanceMode == EInstanceMode::Predicted ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
 	ProjectileMovementComponent->InitialSpeed = InitData.Speed;
 	ProjectileMovementComponent->ProjectileGravityScale = FMath::Max(0.0f, InitData.GravityScale);
 	ProjectileMovementComponent->Velocity = InitData.Direction.GetSafeNormal() * InitData.Speed;
 	SetActorRotation(InitData.Direction.Rotation());
-	VisualComponent->InitializeVisual(InitData.CosmeticOrigin);
+	FVector CosmeticOrigin = InitData.CosmeticOrigin;
+	AStulWeaponProjectile* PredictedProjectile = nullptr;
+	AStulWeapon* SourceWeapon = Cast<AStulWeapon>(GetOwner());
+	if (InstanceMode == EInstanceMode::Simulated && HasLocalNetOwner())
+	{
+		if (SourceWeapon)
+		{
+			PredictedProjectile = SourceWeapon->FindPredictedProjectile(InitData.ProjectileId);
+			if (PredictedProjectile && PredictedProjectile->GetVisualComponent()) CosmeticOrigin = PredictedProjectile->GetVisualComponent()->GetComponentLocation();
+			else if (InitData.ProjectileId.IsValid()) CosmeticOrigin = GetActorLocation();
+			else CosmeticOrigin = SourceWeapon->GetMuzzleTransform().GetLocation();
+		}
+	}
+	else if (InstanceMode == EInstanceMode::Simulated)
+	{
+		CosmeticOrigin = ResolveSimulatedCosmeticOrigin(SourceWeapon, InitData.CosmeticOrigin);
+	}
+	VisualComponent->InitializeVisual(CosmeticOrigin);
 	ProjectileMovementComponent->OnProjectileStop.AddDynamic(this, &ThisClass::HandleProjectileStop);
-	K2_OnProjectileInitialized(InitData);
+	if (PredictedProjectile)
+	{
+		PredictedProjectile->ConfirmPrediction();
+		SetActorHiddenInGame(true);
+	}
+	else K2_OnProjectileInitialized(InitData);
 
-	if (HasAuthority())
+	if (InstanceMode == EInstanceMode::Authoritative)
 	{
 		SetLifeSpan(InitData.MaxLifeSeconds);
+	}
+	else if (InstanceMode == EInstanceMode::Predicted)
+	{
+		SetLifeSpan(FMath::Min(InitData.MaxLifeSeconds, FMath::Max(0.1f, PredictedConfirmationTimeout)));
 	}
 
 #if ENABLE_DRAW_DEBUG
@@ -81,6 +111,18 @@ void AStulWeaponProjectile::BeginPlay()
 #endif
 }
 
+void AStulWeaponProjectile::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (IsPredictedProjectile())
+	{
+		if (AStulWeapon* SourceWeapon = Cast<AStulWeapon>(GetOwner())) SourceWeapon->UnregisterPredictedProjectile(InitData.ProjectileId, this);
+	}
+	if (UPrimitiveComponent* OwnerCollision = IgnoringOwnerCollisionComponent.Get()) OwnerCollision->IgnoreActorWhenMoving(this, false);
+	IgnoringOwnerCollisionComponent.Reset();
+
+	Super::EndPlay(EndPlayReason);
+}
+
 void AStulWeaponProjectile::Tick(const float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
@@ -89,7 +131,7 @@ void AStulWeaponProjectile::Tick(const float DeltaSeconds)
 	if (bDrawDebugTrajectory)
 	{
 		const FVector CurrentLocation = GetActorLocation();
-		const FColor TrajectoryColor = HasAuthority() ? FColor::Orange : FColor::Green;
+		const FColor TrajectoryColor = IsAuthoritativeProjectile() ? FColor::Orange : FColor::Green;
 		DrawDebugLine(GetWorld(), LastDebugLocation, CurrentLocation, TrajectoryColor, false, FMath::Max(0.0f, DebugDrawDuration), 0, FMath::Max(0.0f, DebugLineThickness));
 		LastDebugLocation = CurrentLocation;
 	}
@@ -105,7 +147,7 @@ void AStulWeaponProjectile::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>
 /*********************************************************************************************/
 /************************************ Initialization *****************************************/
 /*********************************************************************************************/
-bool AStulWeaponProjectile::InitializeProjectile(const FStulWeaponProjectileInitData& InInitData, const float InDamage)
+bool AStulWeaponProjectile::InitializeProjectile(const FStulWeaponProjectileInitData& InInitData, const float InDamage, UStulAmmoDefinition* InAmmoDefinition)
 {
 	if (!HasAuthority() || bInitialized || !InInitData.IsValid())
 	{
@@ -115,8 +157,44 @@ bool AStulWeaponProjectile::InitializeProjectile(const FStulWeaponProjectileInit
 
 	InitData = InInitData;
 	Damage = FMath::Max(0.0f, InDamage);
+	AmmoDefinition = InAmmoDefinition;
+	InstanceMode = EInstanceMode::Authoritative;
 	bInitialized = true;
+	ConfigureCollisionIgnores();
+	return true;
+}
 
+bool AStulWeaponProjectile::InitializePredictedProjectile(const FStulWeaponProjectileInitData& InInitData)
+{
+	if (bInitialized || !InInitData.IsValid())
+	{
+		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Projectile '%s' rejected an invalid or repeated predicted initialization request."), *GetNameSafe(this));
+		return false;
+	}
+
+	SetReplicates(false);
+	SetReplicateMovement(false);
+	InitData = InInitData;
+	InstanceMode = EInstanceMode::Predicted;
+	bInitialized = true;
+	ConfigureCollisionIgnores();
+	return true;
+}
+
+void AStulWeaponProjectile::ConfirmPrediction()
+{
+	if (!IsPredictedProjectile() || bPredictionConfirmed) return;
+	bPredictionConfirmed = true;
+	SetLifeSpan(FMath::Max(0.1f, InitData.MaxLifeSeconds));
+}
+
+FVector AStulWeaponProjectile::ResolveSimulatedCosmeticOrigin(const AStulWeapon* SourceWeapon, const FVector& ReplicatedCosmeticOrigin)
+{
+	return SourceWeapon ? SourceWeapon->GetMuzzleTransform().GetLocation() : ReplicatedCosmeticOrigin;
+}
+
+void AStulWeaponProjectile::ConfigureCollisionIgnores()
+{
 	CollisionComponent->ClearMoveIgnoreActors();
 	CollisionComponent->IgnoreActorWhenMoving(this, true);
 	if (AActor* SourceWeapon = GetOwner())
@@ -125,9 +203,13 @@ bool AStulWeaponProjectile::InitializeProjectile(const FStulWeaponProjectileInit
 		if (AActor* WeaponOwner = SourceWeapon->GetOwner())
 		{
 			CollisionComponent->IgnoreActorWhenMoving(WeaponOwner, true);
+			if (UPrimitiveComponent* OwnerCollision = Cast<UPrimitiveComponent>(WeaponOwner->GetRootComponent()))
+			{
+				OwnerCollision->IgnoreActorWhenMoving(this, true);
+				IgnoringOwnerCollisionComponent = OwnerCollision;
+			}
 		}
 	}
-	return true;
 }
 
 /*********************************************************************************************/
@@ -135,9 +217,13 @@ bool AStulWeaponProjectile::InitializeProjectile(const FStulWeaponProjectileInit
 /*********************************************************************************************/
 void AStulWeaponProjectile::HandleProjectileStop(const FHitResult& ImpactResult)
 {
-	if (HasAuthority())
+	if (IsAuthoritativeProjectile())
 	{
 		HandleAuthoritativeImpact(ImpactResult);
+	}
+	else if (IsPredictedProjectile())
+	{
+		Destroy();
 	}
 }
 
@@ -150,25 +236,11 @@ void AStulWeaponProjectile::HandleAuthoritativeImpact(const FHitResult& ImpactRe
 	}
 #endif
 
-	AActor* HitActor = ImpactResult.GetActor();
 	AStulWeapon* SourceWeapon = Cast<AStulWeapon>(GetOwner());
 	if (SourceWeapon)
 	{
-		SourceWeapon->ExecuteImpactGameplayCue(ImpactResult, Damage, this);
-	}
-	if (HitActor)
-	{
-		if (UAbilitySystemComponent* HitAbilitySystem = UAbilitySystemBlueprintLibrary::GetAbilitySystemComponent(HitActor))
-		{
-			FGameplayEventData HitEventData;
-			HitEventData.EventTag = StulWeaponGameplayTags::Event_Hit;
-			HitEventData.Instigator = GetInstigator();
-			HitEventData.Target = HitActor;
-			HitEventData.OptionalObject = SourceWeapon;
-			HitEventData.EventMagnitude = Damage;
-			HitEventData.TargetData.Add(new FGameplayAbilityTargetData_SingleTargetHit(ImpactResult));
-			HitAbilitySystem->HandleGameplayEvent(StulWeaponGameplayTags::Event_Hit, &HitEventData);
-		}
+		SourceWeapon->HandleAuthoritativeHit(ImpactResult, Damage, this, AmmoDefinition, false);
+		if (UStulWeaponFireComponent* FireComponent = SourceWeapon->GetFireComponent()) FireComponent->PresentAuthoritativeProjectileImpact(ImpactResult, Damage, this);
 	}
 
 	Destroy();

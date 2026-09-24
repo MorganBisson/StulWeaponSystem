@@ -16,9 +16,15 @@ public class StulWeaponSystem : ModuleRules
 				"Engine",
 				"GameplayAbilities",
 				"GameplayTags",
+				"NetCore"
+			}
+		);
+
+		PrivateDependencyModuleNames.AddRange(
+			new string[]
+			{
 				"GameplayTasks",
 				"Niagara",
-				"NetCore",
 				"PhysicsCore"
 			}
 		);

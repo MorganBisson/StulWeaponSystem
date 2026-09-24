@@ -14,6 +14,7 @@ class UCurveVector;
 class USkeletalMesh;
 class AStulWeaponProjectile;
 class FDataValidationContext;
+class UStulAmmoDefinition;
 
 /** Immutable authoring data shared by every runtime instance of a weapon. */
 UCLASS(BlueprintType, Const)
@@ -57,6 +58,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|General")
 	TEnumAsByte<ECollisionChannel> AimTraceChannel = ECC_Visibility;
 
+	/** Ammunition payload used by default, independently of the weapon's hitscan or projectile delivery method. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Ammunition")
+	TObjectPtr<UStulAmmoDefinition> DefaultAmmo;
+
 	/* -------------------------------- Visual ------------------------------- */
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Visual")
@@ -92,7 +97,8 @@ public:
 
 	/* ----------------------------- Base stats ------------------------------ */
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Scaling")
+	/** Reserved for the later modifier/scaling roadmap; it is not consumed by runtime gameplay yet. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Scaling")
 	TSoftObjectPtr<UCurveTable> MultipliersCurveTable;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|General", meta = (ClampMin = "0.0"))
@@ -117,31 +123,32 @@ public:
 
 	/* -------------------------------- Spread ------------------------------- */
 
+	/** Base cone currently applied to every shot. Dynamic spread is intentionally deferred. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", Units = "deg"))
 	float BaseMinSpread = 0.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", Units = "deg"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Dynamic Spread", meta = (ClampMin = "0.0", Units = "deg"))
 	float BaseAirMinSpread = 7.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", Units = "deg"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Dynamic Spread", meta = (ClampMin = "0.0", Units = "deg"))
 	float BaseMaxSpread = 25.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Dynamic Spread", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float BaseCrouchSpreadMultiplier = 0.25f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Dynamic Spread", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float BaseStandSpreadMultiplier = 0.45f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "1.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Dynamic Spread", meta = (ClampMin = "1.0"))
 	float BaseAirSpreadMultiplier = 1.5f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", Units = "deg"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Dynamic Spread", meta = (ClampMin = "0.0", Units = "deg"))
 	float BaseSpreadIncreasePerShot = 2.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0", Units = "deg"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Dynamic Spread", meta = (ClampMin = "0.0", Units = "deg"))
 	float BaseMaxSpreadOvershoot = 4.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Spread", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Dynamic Spread", meta = (ClampMin = "0.0"))
 	float BaseSpreadInterpSpeed = 5.0f;
 
 	/* ------------------------------- Reload -------------------------------- */
@@ -180,10 +187,11 @@ public:
 
 	/* ----------------------------- Penetration ----------------------------- */
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Penetration", meta = (ClampMin = "0"))
+	/** Penetration authoring is retained for the roadmap and is not executed by the current shot pipeline. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Penetration", meta = (ClampMin = "0"))
 	int32 BasePenetrationCount = 1;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Penetration", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Penetration", meta = (ClampMin = "0.0"))
 	float BasePenetrationStrength = 0.0f;
 
 	/* ------------------------------ Ballistics ----------------------------- */
@@ -211,22 +219,23 @@ public:
 
 	/* ------------------------------- Recoil -------------------------------- */
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Recoil")
+	/** Recoil authoring is retained for the roadmap and is not consumed by runtime presentation yet. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Recoil")
 	TSoftObjectPtr<UCurveVector> RecoilCurve;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Recoil", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Recoil", meta = (ClampMin = "0.0"))
 	float RecoilRecoverySpeed = 5.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Recoil", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Recoil", meta = (ClampMin = "0.0"))
 	float RecoilSpeed = 2.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Recoil", meta = (ClampMin = "0.0"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Recoil", meta = (ClampMin = "0.0"))
 	float RecoilKickMultiplier = 1.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Recoil", meta = (ClampMin = "0.0", Units = "s"))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Recoil", meta = (ClampMin = "0.0", Units = "s"))
 	float TimeBeforeRecoveryStarts = 0.2f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Recoil")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shooting|Deferred|Recoil")
 	float RecoilKick = 10.0f;
 
 	/* ------------------------------ Animation ------------------------------ */

@@ -25,31 +25,6 @@ UStulWeaponReloadAbility::UStulWeaponReloadAbility()
 	CancelAbilitiesWithTag.AddTag(StulWeaponGameplayTags::Ability_Aim);
 }
 
-bool UStulWeaponReloadAbility::RequestInterruptForFire(bool& bOutWaitForCurrentCycle)
-{
-	bOutWaitForCurrentCycle = false;
-	const AStulWeapon* Weapon = GetStulWeapon();
-	const UStulWeaponDefinition* Definition = Weapon ? Weapon->GetWeaponDefinition() : nullptr;
-	const UStulWeaponAttributeSet* Attributes = GetStulWeaponAttributeSet();
-	if (!IsActive() || !bReloadStarted || !Definition || !Attributes || Definition->ReloadType != EStulWeaponReloadType::Custom)
-	{
-		return false;
-	}
-
-	const bool bAuthority = CurrentActorInfo && CurrentActorInfo->IsNetAuthority();
-	const float EffectiveCurrentAmmo = bAuthority ? Attributes->GetCurrentAmmo() : FMath::Min(Attributes->GetMaxAmmo(), ReloadStartAmmo + static_cast<float>(AmmoRestoredDuringAbility));
-	bOutWaitForCurrentCycle = EffectiveCurrentAmmo < 1.0f - KINDA_SMALL_NUMBER;
-	if (bOutWaitForCurrentCycle)
-	{
-		bInterruptAfterCurrentCycle = true;
-		return true;
-	}
-
-	const bool bReplicateEndAbility = CurrentActorInfo && CurrentActorInfo->IsNetAuthority();
-	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, bReplicateEndAbility, true);
-	return true;
-}
-
 /*********************************************************************************************/
 /************************************ Gameplay Ability ***************************************/
 /*********************************************************************************************/
@@ -96,7 +71,6 @@ void UStulWeaponReloadAbility::ActivateAbility(const FGameplayAbilitySpecHandle 
 
 	AmmoRestoredDuringAbility = 0;
 	ReloadStartAmmo = GetStulWeaponAttributeSet() ? GetStulWeaponAttributeSet()->GetCurrentAmmo() : 0.0f;
-	bInterruptAfterCurrentCycle = false;
 	if (!StartReloadDelay())
 	{
 		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
@@ -104,11 +78,7 @@ void UStulWeaponReloadAbility::ActivateAbility(const FGameplayAbilitySpecHandle 
 	}
 
 	bReloadStarted = true;
-	if (!IsActive())
-	{
-		return;
-	}
-	SendReloadEvent(StulWeaponGameplayTags::Event_Reload_Start, 0.0f);
+	K2_AddGameplayCue(StulWeaponGameplayTags::GameplayCue_Reload, FGameplayEffectContextHandle(), true);
 }
 
 void UStulWeaponReloadAbility::EndAbility(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo, const bool bReplicateEndAbility, const bool bWasCancelled)
@@ -119,12 +89,11 @@ void UStulWeaponReloadAbility::EndAbility(const FGameplayAbilitySpecHandle Handl
 		ReloadDelayTask = nullptr;
 	}
 
-	if (bReloadStarted)
+	if (bReloadStarted && ActorInfo && ActorInfo->IsNetAuthority())
 	{
-		SendReloadEvent(bWasCancelled ? StulWeaponGameplayTags::Event_Reload_Cancelled : StulWeaponGameplayTags::Event_Reload_Completed, static_cast<float>(AmmoRestoredDuringAbility));
+		ExecuteReloadPresentationCue(bWasCancelled ? StulWeaponGameplayTags::GameplayCue_ReloadCancelled : StulWeaponGameplayTags::GameplayCue_ReloadCompleted, static_cast<float>(AmmoRestoredDuringAbility));
 	}
 	bReloadStarted = false;
-	bInterruptAfterCurrentCycle = false;
 
 	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
 
@@ -171,7 +140,7 @@ void UStulWeaponReloadAbility::HandleReloadDelayFinished()
 		return;
 	}
 	AmmoRestoredDuringAbility += AmmoToReload;
-	SendReloadEvent(StulWeaponGameplayTags::Event_Reload_Commit, static_cast<float>(AmmoToReload));
+	ExecuteReloadPresentationCue(StulWeaponGameplayTags::GameplayCue_ReloadCommit, static_cast<float>(AmmoToReload));
 	if (!IsActive())
 	{
 		return;
@@ -180,13 +149,6 @@ void UStulWeaponReloadAbility::HandleReloadDelayFinished()
 	const AStulWeapon* Weapon = GetStulWeapon();
 	const UStulWeaponDefinition* Definition = Weapon ? Weapon->GetWeaponDefinition() : nullptr;
 	const bool bHasAmmoLeftToReload = CalculateAmmoToReload() > 0;
-	if (Definition && Definition->ReloadType == EStulWeaponReloadType::Custom && bInterruptAfterCurrentCycle && bHasAmmoLeftToReload)
-	{
-		const bool bReplicateEndAbility = CurrentActorInfo && CurrentActorInfo->IsNetAuthority();
-		EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, bReplicateEndAbility, true);
-		return;
-	}
-
 	const bool bShouldContinueIncrementalReload = Definition && Definition->ReloadType == EStulWeaponReloadType::Custom && bHasAmmoLeftToReload;
 	if (bShouldContinueIncrementalReload)
 	{
@@ -204,9 +166,9 @@ void UStulWeaponReloadAbility::HandleReloadDelayFinished()
 
 void UStulWeaponReloadAbility::CompleteReload()
 {
-	// Predicted clients end locally; only authority replicates a successful completion.
-	const bool bReplicateEndAbility = CurrentActorInfo && CurrentActorInfo->IsNetAuthority();
-	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, bReplicateEndAbility, false);
+	if (!CurrentActorInfo) return;
+	const bool bIsAuthority = CurrentActorInfo->IsNetAuthority();
+	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, bIsAuthority, false);
 }
 
 int32 UStulWeaponReloadAbility::CalculateAmmoToReload() const
@@ -255,20 +217,19 @@ bool UStulWeaponReloadAbility::ApplyAmmoRestore(const int32 AmmoAmount)
 	return bAmmoRestored;
 }
 
-void UStulWeaponReloadAbility::SendReloadEvent(const FGameplayTag EventTag, const float Magnitude) const
+void UStulWeaponReloadAbility::ExecuteReloadPresentationCue(const FGameplayTag GameplayCueTag, const float Magnitude)
 {
-	UAbilitySystemComponent* AbilitySystem = GetAbilitySystemComponentFromActorInfo();
-	AStulWeapon* Weapon = GetStulWeapon();
-	if (!AbilitySystem || !Weapon || !EventTag.IsValid())
-	{
-		return;
-	}
+	// Delayed reload commits have independent client/server clocks. Only authority emits one-shot cues;
+	// the persistent Reload cue remains predicted so the owner still starts presentation immediately.
+	if (!GameplayCueTag.IsValid() || !CurrentActorInfo || !CurrentActorInfo->IsNetAuthority()) return;
 
-	FGameplayEventData Payload;
-	Payload.EventTag = EventTag;
-	Payload.EventMagnitude = Magnitude;
-	Payload.Instigator = Weapon->GetOwner();
-	Payload.Target = Weapon;
-	Payload.OptionalObject = Weapon->GetWeaponDefinition();
-	AbilitySystem->HandleGameplayEvent(EventTag, &Payload);
+	FGameplayCueParameters Parameters;
+	Parameters.RawMagnitude = Magnitude;
+	if (AStulWeapon* Weapon = GetStulWeapon())
+	{
+		Parameters.Instigator = Weapon->GetOwner();
+		Parameters.EffectCauser = Weapon;
+		Parameters.SourceObject = Weapon->GetWeaponDefinition();
+	}
+	K2_ExecuteGameplayCueWithParams(GameplayCueTag, Parameters);
 }

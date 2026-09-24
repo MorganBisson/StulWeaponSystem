@@ -1,5 +1,6 @@
 #include "Projectiles/ProjectileVisualComponent.h"
 
+#include "Components/PrimitiveComponent.h"
 #include "DrawDebugHelpers.h"
 #include "GameFramework/Actor.h"
 
@@ -8,6 +9,25 @@ UProjectileVisualComponent::UProjectileVisualComponent()
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = false;
 	PrimaryComponentTick.TickGroup = TG_PostPhysics;
+}
+
+/*********************************************************************************************/
+/************************************** Component *******************************************/
+/*********************************************************************************************/
+void UProjectileVisualComponent::BeginPlay()
+{
+	Super::BeginPlay();
+	TArray<USceneComponent*> VisualChildren;
+	GetChildrenComponents(true, VisualChildren);
+	for (USceneComponent* VisualChild : VisualChildren)
+	{
+		if (UPrimitiveComponent* Primitive = Cast<UPrimitiveComponent>(VisualChild))
+		{
+			Primitive->SetSimulatePhysics(false);
+			Primitive->SetGenerateOverlapEvents(false);
+			Primitive->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
+	}
 }
 
 /*********************************************************************************************/
@@ -38,9 +58,6 @@ void UProjectileVisualComponent::InitializeVisual(const FVector& CosmeticOrigin)
 	SetComponentTickEnabled(true);
 }
 
-/*********************************************************************************************/
-/************************************** Component ********************************************/
-/*********************************************************************************************/
 void UProjectileVisualComponent::TickComponent(const float DeltaTime, const ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);

@@ -5,6 +5,7 @@
 
 #include "AbilitySystem/StulWeaponGameplayAbility.h"
 #include "StulWeaponGameplayTags.h"
+#include "Weapons/Ammunition/StulAmmoDefinition.h"
 
 #if WITH_EDITOR
 #include "Misc/DataValidation.h"
@@ -50,26 +51,13 @@ void UStulWeaponDefinition::GetPresentationAssetPaths(TArray<FSoftObjectPath>& O
 	{
 		OutPaths.AddUnique(HitscanTracer.System.ToSoftObjectPath());
 	}
-	if (!Presentation.DefaultImpactEffect.IsNull())
+	if (DefaultAmmo)
 	{
-		OutPaths.AddUnique(Presentation.DefaultImpactEffect.ToSoftObjectPath());
-	}
-	if (!Presentation.DefaultImpactSound.IsNull())
-	{
-		OutPaths.AddUnique(Presentation.DefaultImpactSound.ToSoftObjectPath());
-	}
-	for (const TPair<TEnumAsByte<EPhysicalSurface>, TSoftObjectPtr<UNiagaraSystem>>& Pair : Presentation.ImpactEffectsBySurface)
-	{
-		if (!Pair.Value.IsNull())
+		TArray<FSoftObjectPath> AmmoPresentationAssetPaths;
+		DefaultAmmo->GetPresentationAssetPaths(AmmoPresentationAssetPaths);
+		for (const FSoftObjectPath& AssetPath : AmmoPresentationAssetPaths)
 		{
-			OutPaths.AddUnique(Pair.Value.ToSoftObjectPath());
-		}
-	}
-	for (const TPair<TEnumAsByte<EPhysicalSurface>, TSoftObjectPtr<USoundBase>>& Pair : Presentation.ImpactSoundsBySurface)
-	{
-		if (!Pair.Value.IsNull())
-		{
-			OutPaths.AddUnique(Pair.Value.ToSoftObjectPath());
+			OutPaths.AddUnique(AssetPath);
 		}
 	}
 }
@@ -102,6 +90,14 @@ EDataValidationResult UStulWeaponDefinition::IsDataValid(FDataValidationContext&
 	if (AimData.AimSocketName.IsNone())
 	{
 		AddError(NSLOCTEXT("StulWeaponValidation", "MissingAimSocket", "AimData.AimSocketName must not be None."));
+	}
+	if (!DefaultAmmo)
+	{
+		AddError(NSLOCTEXT("StulWeaponValidation", "MissingDefaultAmmo", "A DefaultAmmo definition must be configured."));
+	}
+	else if (!DefaultAmmo->ImpactProfile)
+	{
+		AddError(NSLOCTEXT("StulWeaponValidation", "MissingImpactProfile", "The DefaultAmmo definition must reference an ImpactProfile."));
 	}
 	if (AimData.Magnification < 1.0f)
 	{
@@ -136,8 +132,9 @@ EDataValidationResult UStulWeaponDefinition::IsDataValid(FDataValidationContext&
 		if (PatternPair.Key <= 0)
 		{
 			AddError(NSLOCTEXT("StulWeaponValidation", "InvalidShotPatternCount", "ShotPatterns keys must be greater than zero."));
-			break;
+			continue;
 		}
+		if (PatternPair.Value.ShotPoints.Num() != PatternPair.Key) AddError(FText::Format(NSLOCTEXT("StulWeaponValidation", "MismatchedShotPatternSize", "Shot pattern {0} must contain exactly {0} points."), FText::AsNumber(PatternPair.Key)));
 	}
 
 	if (AvailableFireModes.IsEmpty())
@@ -151,11 +148,9 @@ EDataValidationResult UStulWeaponDefinition::IsDataValid(FDataValidationContext&
 
 	for (const FGameplayTag FireMode : AvailableFireModes)
 	{
-		if (!FireMode.IsValid()
-			|| FireMode == StulWeaponGameplayTags::FireMode_Root
-			|| !FireMode.MatchesTag(StulWeaponGameplayTags::FireMode_Root))
+		if (!StulWeaponGameplayTags::IsSupportedFireMode(FireMode))
 		{
-			AddError(NSLOCTEXT("StulWeaponValidation", "InvalidFireMode", "Fire modes must be children of Stul.Weapon.FireMode."));
+			AddError(NSLOCTEXT("StulWeaponValidation", "UnsupportedFireMode", "AvailableFireModes may currently contain only Single, Burst or Automatic."));
 			break;
 		}
 	}
@@ -198,6 +193,7 @@ EDataValidationResult UStulWeaponDefinition::IsDataValid(FDataValidationContext&
 		AddError(NSLOCTEXT("StulWeaponValidation", "InvalidProjectileLifetime", "Projectile weapons require ProjectileMaxLifeSeconds to be greater than zero."));
 	}
 
+	TSet<UClass*> MappedAbilityClasses;
 	for (const FStulWeaponAbilityMapping& Mapping : BaseAbilities)
 	{
 		if (!Mapping.AbilityClass)
@@ -205,6 +201,17 @@ EDataValidationResult UStulWeaponDefinition::IsDataValid(FDataValidationContext&
 			AddError(NSLOCTEXT("StulWeaponValidation", "InvalidAbilityMapping", "Every ability mapping requires an AbilityClass."));
 			break;
 		}
+		if (Mapping.AbilityLevel <= 0)
+		{
+			AddError(NSLOCTEXT("StulWeaponValidation", "InvalidAbilityLevel", "Every ability mapping requires an AbilityLevel greater than zero."));
+			break;
+		}
+		if (MappedAbilityClasses.Contains(Mapping.AbilityClass.Get()))
+		{
+			AddError(NSLOCTEXT("StulWeaponValidation", "DuplicateAbilityClass", "The same weapon ability class cannot be granted more than once."));
+			break;
+		}
+		MappedAbilityClasses.Add(Mapping.AbilityClass.Get());
 
 		const UStulWeaponGameplayAbility* WeaponAbilityCDO = Mapping.AbilityClass.GetDefaultObject();
 		if (!WeaponAbilityCDO
@@ -223,6 +230,11 @@ EDataValidationResult UStulWeaponDefinition::IsDataValid(FDataValidationContext&
 		if (bUsesInput && !Mapping.InputTag.IsValid())
 		{
 			AddError(NSLOCTEXT("StulWeaponValidation", "MissingAbilityInputTag", "Input-triggered weapon abilities require an InputTag."));
+			break;
+		}
+		if (!bUsesInput && Mapping.InputTag.IsValid())
+		{
+			AddError(NSLOCTEXT("StulWeaponValidation", "UnusedAbilityInputTag", "Manual and OnSpawn weapon abilities must not declare an InputTag."));
 			break;
 		}
 

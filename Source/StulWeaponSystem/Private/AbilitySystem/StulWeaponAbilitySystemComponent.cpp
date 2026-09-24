@@ -25,19 +25,17 @@ void UStulWeaponAbilitySystemComponent::AbilityInputTagPressed(const FGameplayTa
 		return;
 	}
 
-	const TArray<FGameplayAbilitySpecHandle>* BoundHandles = InputBindings.Find(InputTag);
-	if (!BoundHandles)
+	int32 BindingCount = 0;
+	for (const FGameplayAbilitySpec& AbilitySpec : ActivatableAbilities.Items)
 	{
-		UE_LOG(LogStulWeaponSystem, VeryVerbose, TEXT("ASC '%s' received pressed input tag '%s' with no bound ability."), *GetNameSafe(this), *InputTag.ToString());
-		return;
+		if (AbilitySpec.Ability && AbilitySpec.GetDynamicSpecSourceTags().HasTagExact(InputTag))
+		{
+			InputPressedSpecHandles.AddUnique(AbilitySpec.Handle);
+			InputHeldSpecHandles.AddUnique(AbilitySpec.Handle);
+			++BindingCount;
+		}
 	}
-
-	for (const FGameplayAbilitySpecHandle Handle : *BoundHandles)
-	{
-		InputPressedSpecHandles.AddUnique(Handle);
-		InputHeldSpecHandles.AddUnique(Handle);
-	}
-	UE_LOG(LogStulWeaponSystem, VeryVerbose, TEXT("ASC '%s' queued pressed input tag '%s' for %d ability spec(s)."), *GetNameSafe(this), *InputTag.ToString(), BoundHandles->Num());
+	UE_LOG(LogStulWeaponSystem, VeryVerbose, TEXT("ASC '%s' queued pressed input tag '%s' for %d ability spec(s)."), *GetNameSafe(this), *InputTag.ToString(), BindingCount);
 }
 
 void UStulWeaponAbilitySystemComponent::AbilityInputTagReleased(const FGameplayTag InputTag)
@@ -48,19 +46,17 @@ void UStulWeaponAbilitySystemComponent::AbilityInputTagReleased(const FGameplayT
 		return;
 	}
 
-	const TArray<FGameplayAbilitySpecHandle>* BoundHandles = InputBindings.Find(InputTag);
-	if (!BoundHandles)
+	int32 BindingCount = 0;
+	for (const FGameplayAbilitySpec& AbilitySpec : ActivatableAbilities.Items)
 	{
-		UE_LOG(LogStulWeaponSystem, VeryVerbose, TEXT("ASC '%s' received released input tag '%s' with no bound ability."), *GetNameSafe(this), *InputTag.ToString());
-		return;
+		if (AbilitySpec.Ability && AbilitySpec.GetDynamicSpecSourceTags().HasTagExact(InputTag))
+		{
+			InputHeldSpecHandles.Remove(AbilitySpec.Handle);
+			InputReleasedSpecHandles.AddUnique(AbilitySpec.Handle);
+			++BindingCount;
+		}
 	}
-
-	for (const FGameplayAbilitySpecHandle Handle : *BoundHandles)
-	{
-		InputHeldSpecHandles.Remove(Handle);
-		InputReleasedSpecHandles.AddUnique(Handle);
-	}
-	UE_LOG(LogStulWeaponSystem, VeryVerbose, TEXT("ASC '%s' queued released input tag '%s' for %d ability spec(s)."), *GetNameSafe(this), *InputTag.ToString(), BoundHandles->Num());
+	UE_LOG(LogStulWeaponSystem, VeryVerbose, TEXT("ASC '%s' queued released input tag '%s' for %d ability spec(s)."), *GetNameSafe(this), *InputTag.ToString(), BindingCount);
 }
 
 void UStulWeaponAbilitySystemComponent::ProcessAbilityInput(const bool bGamePaused)
@@ -72,17 +68,6 @@ void UStulWeaponAbilitySystemComponent::ProcessAbilityInput(const bool bGamePaus
 	}
 
 	TArray<FGameplayAbilitySpecHandle> AbilitiesToActivate;
-	InputHeldSpecHandles.RemoveAll([this](const FGameplayAbilitySpecHandle Handle)
-	{
-		if (FindAbilitySpecFromHandle(Handle))
-		{
-			return false;
-		}
-
-		UE_LOG(LogStulWeaponSystem, Warning, TEXT("ASC '%s' removed stale held-input ability handle '%s'."), *GetNameSafe(this), *Handle.ToString());
-		return true;
-	});
-
 	for (const FGameplayAbilitySpecHandle Handle : InputHeldSpecHandles)
 	{
 		if (const FGameplayAbilitySpec* AbilitySpec = FindAbilitySpecFromHandle(Handle))
@@ -178,32 +163,22 @@ void UStulWeaponAbilitySystemComponent::ClearAbilityInput()
 
 bool UStulWeaponAbilitySystemComponent::IsAbilityInputTagHeld(const FGameplayTag InputTag) const
 {
-	const TArray<FGameplayAbilitySpecHandle>* BoundHandles = InputBindings.Find(InputTag);
-	if (!BoundHandles)
+	for (const FGameplayAbilitySpec& AbilitySpec : ActivatableAbilities.Items)
 	{
-		return false;
+		if (AbilitySpec.Ability && AbilitySpec.GetDynamicSpecSourceTags().HasTagExact(InputTag) && InputHeldSpecHandles.Contains(AbilitySpec.Handle)) return true;
 	}
-
-	return BoundHandles->ContainsByPredicate([this](const FGameplayAbilitySpecHandle Handle)
-	{
-		return InputHeldSpecHandles.Contains(Handle);
-	});
+	return false;
 }
 
 bool UStulWeaponAbilitySystemComponent::TryActivateAbilitiesByInputTag(const FGameplayTag InputTag)
 {
-	const TArray<FGameplayAbilitySpecHandle>* BoundHandles = InputBindings.Find(InputTag);
-	if (!BoundHandles)
-	{
-		return false;
-	}
-
 	bool bActivatedAny = false;
-	for (const FGameplayAbilitySpecHandle Handle : *BoundHandles)
+	TArray<FGameplayAbilitySpecHandle> HandlesToActivate;
+	for (const FGameplayAbilitySpec& AbilitySpec : ActivatableAbilities.Items)
 	{
-		const FGameplayAbilitySpec* AbilitySpec = FindAbilitySpecFromHandle(Handle);
-		if (AbilitySpec && !AbilitySpec->IsActive()) bActivatedAny |= TryActivateAbility(Handle);
+		if (AbilitySpec.Ability && !AbilitySpec.IsActive() && AbilitySpec.GetDynamicSpecSourceTags().HasTagExact(InputTag)) HandlesToActivate.Add(AbilitySpec.Handle);
 	}
+	for (const FGameplayAbilitySpecHandle Handle : HandlesToActivate) bActivatedAny |= TryActivateAbility(Handle);
 	return bActivatedAny;
 }
 
@@ -223,15 +198,16 @@ void UStulWeaponAbilitySystemComponent::TryActivateAbilitiesOnSpawn()
 	{
 		if (const FGameplayAbilitySpec* AbilitySpec = FindAbilitySpecFromHandle(Handle))
 		{
-			TryActivateAbilityOnSpawn(*AbilitySpec);
+			if (const UStulWeaponGameplayAbility* WeaponAbility = Cast<UStulWeaponGameplayAbility>(AbilitySpec->Ability)) WeaponAbility->TryActivateAbilityOnSpawn(AbilityActorInfo.Get(), *AbilitySpec);
 		}
 	}
 }
 
 void UStulWeaponAbilitySystemComponent::InitAbilityActorInfo(AActor* InOwnerActor, AActor* InAvatarActor)
 {
+	const AActor* PreviousAvatar = AbilityActorInfo.IsValid() ? AbilityActorInfo->AvatarActor.Get() : nullptr;
 	Super::InitAbilityActorInfo(InOwnerActor, InAvatarActor);
-	TryActivateAbilitiesOnSpawn();
+	if (InAvatarActor && InAvatarActor != PreviousAvatar) TryActivateAbilitiesOnSpawn();
 }
 
 void UStulWeaponAbilitySystemComponent::OnGiveAbility(FGameplayAbilitySpec& AbilitySpec)
@@ -243,8 +219,6 @@ void UStulWeaponAbilitySystemComponent::OnGiveAbility(FGameplayAbilitySpec& Abil
 	{
 		UE_LOG(LogStulWeaponSystem, Warning, TEXT("ASC '%s' received non-weapon ability '%s'; weapon input and activation policies will not be applied."), *GetNameSafe(this), *GetNameSafe(AbilitySpec.Ability));
 	}
-
-	AddInputBindings(AbilitySpec);
 
 	if (WeaponAbility && (WeaponAbility->GetActivationPolicy() == EStulWeaponAbilityActivationPolicy::OnInputTriggered || WeaponAbility->GetActivationPolicy() == EStulWeaponAbilityActivationPolicy::WhileInputActive))
 	{
@@ -259,8 +233,6 @@ void UStulWeaponAbilitySystemComponent::OnGiveAbility(FGameplayAbilitySpec& Abil
 			UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon ability '%s' uses an input activation policy but spec '%s' has no valid weapon input tag."), *GetNameSafe(WeaponAbility), *AbilitySpec.Handle.ToString());
 		}
 	}
-
-	TryActivateAbilityOnSpawn(AbilitySpec);
 }
 
 void UStulWeaponAbilitySystemComponent::OnRemoveAbility(FGameplayAbilitySpec& AbilitySpec)
@@ -268,7 +240,6 @@ void UStulWeaponAbilitySystemComponent::OnRemoveAbility(FGameplayAbilitySpec& Ab
 	InputPressedSpecHandles.Remove(AbilitySpec.Handle);
 	InputReleasedSpecHandles.Remove(AbilitySpec.Handle);
 	InputHeldSpecHandles.Remove(AbilitySpec.Handle);
-	RemoveInputBindings(AbilitySpec);
 	Super::OnRemoveAbility(AbilitySpec);
 }
 
@@ -281,19 +252,8 @@ void UStulWeaponAbilitySystemComponent::AbilitySpecInputPressed(FGameplayAbility
 		return;
 	}
 
-	const TArray<UGameplayAbility*> AbilityInstances = Spec.GetAbilityInstances();
-	if (AbilityInstances.IsEmpty())
-	{
-		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Active ability '%s' has no instance for replicated InputPressed event. Weapon abilities must be Instanced Per Actor."), *GetNameSafe(Spec.Ability));
-		return;
-	}
-
-	const UGameplayAbility* AbilityInstance = AbilityInstances.Last();
-	if (!AbilityInstance)
-	{
-		UE_LOG(LogStulWeaponSystem, Error, TEXT("Ability '%s' returned a null instance for replicated InputPressed event."), *GetNameSafe(Spec.Ability));
-		return;
-	}
+	const UGameplayAbility* AbilityInstance = Spec.GetPrimaryInstance();
+	if (!ensureMsgf(AbilityInstance, TEXT("Active weapon ability spec '%s' has no primary instance."), *Spec.Handle.ToString())) return;
 
 	const FPredictionKey PredictionKey = AbilityInstance->GetCurrentActivationInfo().GetActivationPredictionKey();
 	InvokeReplicatedEvent(EAbilityGenericReplicatedEvent::InputPressed, Spec.Handle, PredictionKey);
@@ -308,74 +268,9 @@ void UStulWeaponAbilitySystemComponent::AbilitySpecInputReleased(FGameplayAbilit
 		return;
 	}
 
-	const TArray<UGameplayAbility*> AbilityInstances = Spec.GetAbilityInstances();
-	if (AbilityInstances.IsEmpty())
-	{
-		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Active ability '%s' has no instance for replicated InputReleased event. Weapon abilities must be Instanced Per Actor."), *GetNameSafe(Spec.Ability));
-		return;
-	}
-
-	const UGameplayAbility* AbilityInstance = AbilityInstances.Last();
-	if (!AbilityInstance)
-	{
-		UE_LOG(LogStulWeaponSystem, Error, TEXT("Ability '%s' returned a null instance for replicated InputReleased event."), *GetNameSafe(Spec.Ability));
-		return;
-	}
+	const UGameplayAbility* AbilityInstance = Spec.GetPrimaryInstance();
+	if (!ensureMsgf(AbilityInstance, TEXT("Active weapon ability spec '%s' has no primary instance."), *Spec.Handle.ToString())) return;
 
 	const FPredictionKey PredictionKey = AbilityInstance->GetCurrentActivationInfo().GetActivationPredictionKey();
 	InvokeReplicatedEvent(EAbilityGenericReplicatedEvent::InputReleased, Spec.Handle, PredictionKey);
-}
-
-void UStulWeaponAbilitySystemComponent::TryActivateAbilityOnSpawn(const FGameplayAbilitySpec& AbilitySpec)
-{
-	const UStulWeaponGameplayAbility* WeaponAbility = Cast<UStulWeaponGameplayAbility>(AbilitySpec.Ability);
-	const AActor* TempAvatarActor = AbilityActorInfo.IsValid() ? AbilityActorInfo->AvatarActor.Get() : nullptr;
-	if (!WeaponAbility || WeaponAbility->GetActivationPolicy() != EStulWeaponAbilityActivationPolicy::OnSpawn || AbilitySpec.IsActive() || !TempAvatarActor || TempAvatarActor->GetTearOff() || TempAvatarActor->IsActorBeingDestroyed() || TempAvatarActor->GetLifeSpan() > 0.0f)
-	{
-		return;
-	}
-
-	const EGameplayAbilityNetExecutionPolicy::Type NetExecutionPolicy = WeaponAbility->GetNetExecutionPolicy();
-	const bool bLocallyControlled = AbilityActorInfo->IsLocallyControlled();
-	const bool bNetAuthority = AbilityActorInfo->IsNetAuthority();
-	const bool bLocalExecution = NetExecutionPolicy == EGameplayAbilityNetExecutionPolicy::LocalOnly || NetExecutionPolicy == EGameplayAbilityNetExecutionPolicy::LocalPredicted;
-	const bool bServerExecution = NetExecutionPolicy == EGameplayAbilityNetExecutionPolicy::ServerOnly || NetExecutionPolicy == EGameplayAbilityNetExecutionPolicy::ServerInitiated;
-
-	if ((bLocallyControlled && bLocalExecution) || (bNetAuthority && bServerExecution))
-	{
-		if (!TryActivateAbility(AbilitySpec.Handle))
-		{
-			UE_LOG(LogStulWeaponSystem, VeryVerbose, TEXT("ASC '%s' could not activate OnSpawn ability '%s' (activation requirements may not be met)."), *GetNameSafe(this), *GetNameSafe(WeaponAbility));
-		}
-	}
-}
-
-void UStulWeaponAbilitySystemComponent::AddInputBindings(const FGameplayAbilitySpec& AbilitySpec)
-{
-	for (const FGameplayTag& Tag : AbilitySpec.GetDynamicSpecSourceTags())
-	{
-		if (IsWeaponInputTag(Tag))
-		{
-			InputBindings.FindOrAdd(Tag).AddUnique(AbilitySpec.Handle);
-		}
-		else if (Tag == StulWeaponGameplayTags::InputTag_Root)
-		{
-			UE_LOG(LogStulWeaponSystem, Warning, TEXT("Ability '%s' uses root tag '%s' as an input binding; use a child tag instead."), *GetNameSafe(AbilitySpec.Ability), *Tag.ToString());
-		}
-	}
-}
-
-void UStulWeaponAbilitySystemComponent::RemoveInputBindings(const FGameplayAbilitySpec& AbilitySpec)
-{
-	for (const FGameplayTag& Tag : AbilitySpec.GetDynamicSpecSourceTags())
-	{
-		if (TArray<FGameplayAbilitySpecHandle>* BoundHandles = InputBindings.Find(Tag))
-		{
-			BoundHandles->Remove(AbilitySpec.Handle);
-			if (BoundHandles->IsEmpty())
-			{
-				InputBindings.Remove(Tag);
-			}
-		}
-	}
 }

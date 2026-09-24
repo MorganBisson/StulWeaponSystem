@@ -39,16 +39,10 @@ bool UStulWeaponTracerCue::OnExecute_Implementation(AActor* MyTarget, const FGam
 		return false;
 	}
 
-	const float TracerDistance = FMath::Max(0.0f, Parameters.RawMagnitude);
-	const FVector TracerDirection = FVector(Parameters.Normal).GetSafeNormal();
-	if (TracerDistance <= UE_KINDA_SMALL_NUMBER || TracerDirection.IsNearlyZero())
-	{
-		return false;
-	}
-
-	const FVector TracerStart = Parameters.Location;
-	const FVector TracerTarget = TracerStart + TracerDirection * TracerDistance;
-	UNiagaraComponent* TracerComponent = UNiagaraFunctionLibrary::SpawnSystemAtLocation(Weapon, TracerSystem, TracerStart, FRotator::ZeroRotator, FVector::OneVector, true, false, ENCPoolMethod::AutoRelease, true);
+	FVector TracerStart;
+	FVector TracerTarget;
+	if (!ResolveTracerEndpoints(*Weapon, Parameters, TracerStart, TracerTarget)) return false;
+	UNiagaraComponent* TracerComponent = UNiagaraFunctionLibrary::SpawnSystemAtLocation(Weapon, TracerSystem, TracerStart, FRotator::ZeroRotator, FVector::OneVector, false, false, ENCPoolMethod::AutoRelease, true);
 	if (!TracerComponent)
 	{
 		return false;
@@ -61,6 +55,18 @@ bool UStulWeaponTracerCue::OnExecute_Implementation(AActor* MyTarget, const FGam
 	TracerComponent->SetVariableFloat(StulWeaponTracerParameters::Length, TracerData.Length);
 	TracerComponent->SetVariableFloat(StulWeaponTracerParameters::Width, TracerData.Width);
 	TracerComponent->Activate(true);
+
+	return true;
+}
+
+bool UStulWeaponTracerCue::ResolveTracerEndpoints(const AStulWeapon& Weapon, const FGameplayCueParameters& Parameters, FVector& OutStart, FVector& OutTarget)
+{
+	const float TracerDistance = FMath::Max(0.0f, Parameters.RawMagnitude);
+	const FVector TracerDirection = FVector(Parameters.Normal).GetSafeNormal();
+	if (TracerDistance <= UE_KINDA_SMALL_NUMBER || TracerDirection.IsNearlyZero()) return false;
+
+	OutStart = Weapon.GetMuzzleTransform().GetLocation();
+	OutTarget = FVector(Parameters.Location) + TracerDirection * TracerDistance;
 	return true;
 }
 

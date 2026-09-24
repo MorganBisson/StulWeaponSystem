@@ -1,38 +1,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Abilities/GameplayAbilityTargetTypes.h"
+#include "Weapons/Shooting/StulWeaponFireSessionTypes.h"
 #include "StulWeaponShootingTypes.generated.h"
-
-/** Compact client aim data sent to the server for one weapon shot. */
-USTRUCT()
-struct STULWEAPONSYSTEM_API FGameplayAbilityTargetData_StulWeaponShot : public FGameplayAbilityTargetData
-{
-	GENERATED_BODY()
-
-	UPROPERTY()
-	FVector_NetQuantize10 ViewOrigin = FVector::ZeroVector;
-
-	UPROPERTY()
-	FVector_NetQuantizeNormal ViewDirection = FVector::ForwardVector;
-
-	UPROPERTY()
-	uint16 ShotSequence = 0;
-
-	virtual UScriptStruct* GetScriptStruct() const override { return StaticStruct(); }
-	virtual bool HasOrigin() const override { return true; }
-	virtual FTransform GetOrigin() const override { return FTransform(ViewDirection.Rotation(), ViewOrigin); }
-	virtual bool HasEndPoint() const override { return true; }
-	virtual FVector GetEndPoint() const override { return ViewOrigin + ViewDirection; }
-	virtual FString ToString() const override { return TEXT("FGameplayAbilityTargetData_StulWeaponShot"); }
-	bool NetSerialize(FArchive& Ar, UPackageMap* Map, bool& bOutSuccess);
-};
-
-template<>
-struct TStructOpsTypeTraits<FGameplayAbilityTargetData_StulWeaponShot> : public TStructOpsTypeTraitsBase2<FGameplayAbilityTargetData_StulWeaponShot>
-{
-	enum { WithNetSerializer = true };
-};
 
 /** Immutable input used to calculate one projectile or hitscan direction. */
 USTRUCT(BlueprintType)
@@ -89,6 +59,25 @@ struct STULWEAPONSYSTEM_API FStulWeaponShotResult
 
 	UPROPERTY(BlueprintReadOnly, Category = "Shot")
 	bool bBlockingHit = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Shot")
+	bool bAuthoritative = false;
+};
+
+/** Results produced by one logical weapon shot and its shared sequence number. */
+USTRUCT(BlueprintType)
+struct STULWEAPONSYSTEM_API FStulWeaponShotExecution
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Shot")
+	FStulShotId ShotId;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Shot")
+	int32 ShotSequence = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Shot")
+	TArray<FStulWeaponShotResult> Results;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Shot")
 	bool bAuthoritative = false;

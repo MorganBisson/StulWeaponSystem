@@ -49,6 +49,7 @@ void UStulWeaponChangeFireModeAbility::ActivateAbility(const FGameplayAbilitySpe
 	}
 
 	bFireModeCommitted = false;
+	K2_AddGameplayCue(StulWeaponGameplayTags::GameplayCue_ChangeFireMode, FGameplayEffectContextHandle(), true);
 	if (!StartChangeDelay())
 	{
 		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);

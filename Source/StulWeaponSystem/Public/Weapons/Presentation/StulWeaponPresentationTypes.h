@@ -38,16 +38,4 @@ struct STULWEAPONSYSTEM_API FStulWeaponPresentationData
 	/** Optional value for a Niagara user parameter such as User.MuzzleColor. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Visual|Effects|Fire")
 	FLinearColor MuzzleColor = FLinearColor::White;
-
-	/************************ Impact ************************/
-	/** Fallback used when no effect is configured for the impacted Physical Surface. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Visual|Effects|Impact")
-	TSoftObjectPtr<UNiagaraSystem> DefaultImpactEffect;
-	/** Fallback used when no sound is configured for the impacted Physical Surface. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Visual|Effects|Impact")
-	TSoftObjectPtr<USoundBase> DefaultImpactSound;
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Visual|Effects|Impact")
-	TMap<TEnumAsByte<EPhysicalSurface>, TSoftObjectPtr<UNiagaraSystem>> ImpactEffectsBySurface;
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Visual|Effects|Impact")
-	TMap<TEnumAsByte<EPhysicalSurface>, TSoftObjectPtr<USoundBase>> ImpactSoundsBySurface;
 };

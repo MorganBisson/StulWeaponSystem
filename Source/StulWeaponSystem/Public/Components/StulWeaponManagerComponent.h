@@ -72,6 +72,16 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FStulWeaponEquippedSignature, AStul
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FStulWeaponAddedSignature, AStulWeapon*, Weapon, int32, SlotIndex);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FStulWeaponRemovedSignature, AStulWeapon*, Weapon, int32, SlotIndex);
 
+UENUM()
+enum class EStulWeaponManagerLoadoutState : uint8
+{
+	NotStarted,
+	Scheduling,
+	Loading,
+	Succeeded,
+	Failed
+};
+
 /** Server-authoritative weapon inventory, equipment state and input router. */
 UCLASS(ClassGroup = (StulWeaponSystem), meta = (BlueprintSpawnableComponent))
 class STULWEAPONSYSTEM_API UStulWeaponManagerComponent : public UActorComponent
@@ -86,6 +96,7 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Stul Weapon System|Initialization")
 	void InitializeDefaultLoadout();
 
+	/** True after the complete default loadout succeeded and all of its replicated weapon references initialized locally. This milestone remains latched across later inventory changes. */
 	UFUNCTION(BlueprintPure, Category = "Stul Weapon System|Initialization")
 	bool IsReady() const { return bIsReady; }
 
@@ -181,7 +192,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stul Weapon System|Configuration", meta = (ClampMin = "1", UIMin = "1"))
 	int32 MaxWeaponSlots = 2;
 
-	/** Primary Asset IDs spawned by InitializeDefaultLoadout. Invalid or overflowing entries are skipped. */
+	/** Primary Asset IDs spawned by InitializeDefaultLoadout. Overflowing entries are skipped; an invalid in-range entry fails readiness. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Stul Weapon System|Configuration", meta = (AllowedTypes = "StulWeaponDefinition"))
 	TArray<FPrimaryAssetId> DefaultWeaponLoadout;
 
@@ -194,7 +205,10 @@ private:
 	int32 FindAvailableSlot() const;
 	int32 FindAdjacentOccupiedSlot(int32 Direction) const;
 	void HandleInitializationStartFailure(AStulWeapon* Weapon);
+	void FailDefaultLoadoutInitialization();
 	void CheckDefaultLoadoutReady();
+	void RefreshReadyState();
+	bool CanBecomeReady() const;
 	void ApplyEquippedSlot(int32 SlotIndex);
 	void SetEquippedWeapon(AStulWeapon* NewWeapon);
 	void HandleReplicatedWeaponAdded(AStulWeapon* Weapon, int32 SlotIndex);
@@ -206,6 +220,8 @@ private:
 	UFUNCTION()
 	void HandleWeaponInitializationFailed(AStulWeapon* Weapon, FText Reason);
 	UFUNCTION()
+	void HandleReplicatedWeaponReady(AStulWeapon* Weapon);
+	UFUNCTION()
 	void HandleWeaponDestroyed(AActor* DestroyedActor);
 
 	/************************ Replication ************************/
@@ -216,7 +232,9 @@ private:
 	void OnRep_EquippedWeapon(AStulWeapon* PreviousWeapon);
 
 	UFUNCTION()
-	void OnRep_IsReady();
+	void OnRep_DefaultLoadoutState();
+	UFUNCTION()
+	void OnRep_ReadyWeaponCount();
 
 	UPROPERTY(Replicated)
 	FStulWeaponList WeaponList;
@@ -224,15 +242,16 @@ private:
 	UPROPERTY(ReplicatedUsing = OnRep_EquippedWeapon)
 	TObjectPtr<AStulWeapon> EquippedWeapon;
 
-	UPROPERTY(ReplicatedUsing = OnRep_IsReady)
-	bool bIsReady = false;
+	UPROPERTY(ReplicatedUsing = OnRep_DefaultLoadoutState)
+	EStulWeaponManagerLoadoutState DefaultLoadoutState = EStulWeaponManagerLoadoutState::NotStarted;
+	UPROPERTY(ReplicatedUsing = OnRep_ReadyWeaponCount)
+	int32 ReadyWeaponCount = INDEX_NONE;
 
 	/************************ Runtime State ************************/
 	TMap<TWeakObjectPtr<AStulWeapon>, int32> PendingWeaponSlots;
 	TSet<TWeakObjectPtr<AStulWeapon>> PendingDefaultLoadoutWeapons;
 
-	bool bDefaultLoadoutInitializationStarted = false;
-	bool bDefaultLoadoutSchedulingComplete = false;
+	bool bIsReady = false;
 
 	friend struct FStulWeaponList;
 };

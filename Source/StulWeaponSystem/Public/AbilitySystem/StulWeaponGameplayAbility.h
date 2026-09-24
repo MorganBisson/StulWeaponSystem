@@ -7,6 +7,7 @@
 
 class AStulWeapon;
 class UStulWeaponAttributeSet;
+struct FGameplayAbilitySpec;
 
 /** Common base class for abilities executed by a Stul weapon. */
 UCLASS(Abstract, Blueprintable)
@@ -18,6 +19,7 @@ public:
 	UStulWeaponGameplayAbility();
 
 	EStulWeaponAbilityActivationPolicy GetActivationPolicy() const { return ActivationPolicy; }
+	void TryActivateAbilityOnSpawn(const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilitySpec& Spec) const;
 
 	UFUNCTION(BlueprintPure, Category = "Stul Weapon System|Ability")
 	AStulWeapon* GetStulWeapon() const;
@@ -38,6 +40,7 @@ public:
 	bool GetWeaponMovementData(FStulWeaponMovementData& OutMovementData) const;
 
 protected:
+	virtual void OnGiveAbility(const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilitySpec& Spec) override;
 	virtual bool CanActivateAbility(
 		const FGameplayAbilitySpecHandle Handle,
 		const FGameplayAbilityActorInfo* ActorInfo,

@@ -50,6 +50,22 @@ FVector UStulWeaponShootingLibrary::CalculateShotDirection(const FStulWeaponShot
 	return Direction.GetSafeNormal();
 }
 
+bool UStulWeaponShootingLibrary::ValidateAndResolveClientView(const FVector& ClientOrigin, const FVector& ClientDirection, const FVector& ServerOrigin, const float MaxOriginError, FVector& OutTraceOrigin, FVector& OutAimDirection)
+{
+	OutTraceOrigin = FVector::ZeroVector;
+	OutAimDirection = FVector::ZeroVector;
+	if (ClientOrigin.ContainsNaN() || ClientDirection.ContainsNaN() || ServerOrigin.ContainsNaN()) return false;
+
+	const FVector SafeClientDirection = ClientDirection.GetSafeNormal();
+	if (SafeClientDirection.IsNearlyZero()) return false;
+	if (FVector::DistSquared(ClientOrigin, ServerOrigin) > FMath::Square(FMath::Max(0.0f, MaxOriginError))) return false;
+
+	// Direction is client-authored while the trace can never start from client-authored space.
+	OutTraceOrigin = ServerOrigin;
+	OutAimDirection = SafeClientDirection;
+	return true;
+}
+
 FVector UStulWeaponShootingLibrary::CalculateMuzzleOffset(const FTransform& MuzzleTransform, const FVector2D& PatternOffset, const float OffsetScale)
 {
 	if (OffsetScale <= 0.0f || PatternOffset.IsNearlyZero())

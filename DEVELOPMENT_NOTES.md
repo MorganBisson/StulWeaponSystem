@@ -1,6 +1,6 @@
 # StulWeaponSystem — état d’avancement
 
-Dernière mise à jour : 15 septembre 2026.
+Dernière mise à jour : 17 septembre 2026.
 
 ## Objectif
 
@@ -85,7 +85,7 @@ Travail réalisé :
 
 1. `BeginPlay` n’est plus considéré comme le signal de disponibilité du GAS. L’initialisation explicite appelle `InitAbilityActorInfo`, ce qui déclenche `OnAvatarSet` sur les abilities une fois le propriétaire logique connu. `OnWeaponReady` attend à la fois l’ActorInfo GAS et les assets runtime.
 2. L’initialisation est à usage unique et son booléen indique correctement si la demande a démarré.
-3. `AvailableFireModes` utilise un `FGameplayTagContainer` et représente uniquement l’ensemble des modes supportés. `CycleFireMode` utilise séparément l’ordre canonique `Single -> Burst -> Automatic` afin de ne pas faire dépendre le gameplay de l’ordre interne ou de l’affichage du container.
+3. `AvailableFireModes` utilise un `FGameplayTagContainer` et représente uniquement l’ensemble des modes supportés. `GetNextFireMode` utilise séparément l’ordre canonique `Single -> Burst -> Automatic` afin de ne pas faire dépendre le gameplay de l’ordre interne ou de l’affichage du container.
 4. Les attributs de l’arme sont répliqués au propriétaire uniquement. Les Gameplay Cues et les tags servent aux informations destinées aux autres clients.
 5. `CurrentAmmo` est ramené sous `MaxAmmo` lorsque le maximum diminue, y compris lors du retrait d’un Gameplay Effect persistant.
 6. Le composant Manager vide ne ticke plus et `ProcessAbilityInput` ne reçoit plus de `DeltaTime` inutilisé.
@@ -123,7 +123,7 @@ La première implémentation de tir du plugin est consacrée au hitscan :
 - l’ability propose un debug visuel désactivé par défaut montrant la visée caméra, la trace gameplay, le trajet visuel depuis le muzzle et les impacts ; les futures implémentations de traces et de volumes doivent proposer un équivalent configurable afin de rester testables sans assets visuels ;
 - le coût en munitions est transmis au Gameplay Effect instantané par `Stul.Weapon.SetByCaller.Ammo` ; l’ability contrôle explicitement les munitions disponibles avant d’appliquer ce coût prédit ;
 - le mode burst utilise `FireInterval` entre les projectiles, `BurstShotCount` pour la taille de la rafale et `BurstInterval` entre le dernier projectile d’une rafale et le premier de la suivante ; ce dernier délai est ramené au minimum à `FireInterval` au runtime ;
-- `CycleFireMode` accepte les appels du client propriétaire, transmet une RPC fiable au serveur puis laisse `CurrentFireModeTag` répliquer le résultat ; l’input sémantique `Stul.Weapon.Input.ChangeFireMode` emprunte le même chemin ;
+- le changement de mode passe exclusivement par `UStulWeaponChangeFireModeAbility` et l’input sémantique `Stul.Weapon.Input.ChangeFireMode` ; `CurrentFireModeTag` réplique ensuite le résultat autoritaire ;
 - les projectiles, la pénétration, les dégâts fournis par un Gameplay Effect, les Gameplay Cues et la compensation de latence seront ajoutés par tranches séparées.
 
 Le code historique de Boston reste une référence fonctionnelle. Il ne doit pas être copié directement : son aléatoire n'est pas déterministe, son projectile n'est pas strictement autoritaire et sa logique mélange gameplay, présentation, Niagara, pénétration et dépendances FPS.
@@ -132,7 +132,7 @@ Le code historique de Boston reste une référence fonctionnelle. Il ne doit pas
 
 `InitializeDefaultLoadout` n’est volontairement pas appelé depuis `BeginPlay`. Le projet propriétaire doit l’appeler sur le serveur après que le Pawn est prêt et possédé. Cela évite d’initialiser l’ActorInfo GAS des armes avant que le contrôleur du Pawn existe. Un futur plugin FPS Ready ou une intégration Modular Gameplay peut déclencher cet appel depuis son propre init-state sans créer de dépendance dans `StulWeaponSystem`.
 
-`OnWeaponManagerReady` signifie que le serveur a terminé de constituer le loadout et que cet état a été répliqué. Sur un client, les ressources visuelles d’une arme peuvent encore être en chargement ; les consommateurs nécessitant le mesh doivent aussi attendre `AStulWeapon::OnWeaponReady`.
+`OnWeaponManagerReady` est un jalon local déclenché une seule fois après le succès complet du loadout par défaut. Sur le serveur, toutes les armes attendues sont initialisées et la première arme est équipée lorsque l'auto-équipement est demandé. Sur un client, l'état de succès, la Fast Array, les références Actor, l'initialisation locale de chaque arme et la référence équipée attendue doivent tous être résolus avant le signal. Un loadout vide est valide ; une entrée invalide ou un échec d'initialisation laisse le Manager non prêt. Les changements d'inventaire effectués après ce jalon ne réinitialisent pas `IsReady()`.
 
 ## Point de reprise — 8 septembre 2026
 
@@ -184,7 +184,7 @@ Corrections et décisions appliquées après ces tests :
 - les impacts sur un acteur sans ASC, comme le sol, ne tentent plus d’envoyer `Stul.Weapon.Event.Hit` et ne produisent donc plus l’erreur `Invalid ability system component` ;
 - le debug visuel configurable montre la visée caméra, les traces prédite et autoritaire, le trajet depuis le muzzle et les impacts ; son épaisseur est configurable et vaut zéro par défaut ;
 - `AvailableFireModes` est maintenant un `FGameplayTagContainer`, tandis que le cycle conserve un ordre canonique séparé ;
-- le client propriétaire peut demander `CycleFireMode` par RPC serveur, directement ou via `Stul.Weapon.Input.ChangeFireMode` ;
+- le client propriétaire demande le changement de mode via l’ability prédite associée à `Stul.Weapon.Input.ChangeFireMode` ; il n’existe plus de RPC métier parallèle sur `AStulWeapon` ;
 - les propriétés et attributs exprimés en secondes ont été renommés `BaseFireInterval`, `BaseBurstInterval`, `FireInterval` et `BurstInterval` ; aucun Core Redirect n’est nécessaire puisque les anciens noms n’avaient pas encore été sauvegardés dans des assets ;
 - les projectiles d’une rafale sont espacés par `FireInterval` et deux rafales par `max(BurstInterval, FireInterval)`.
 
@@ -271,24 +271,30 @@ Ils peuvent d'abord utiliser `Print String` ou des formes de debug. Les assets p
 
 Une première base volontairement simple est maintenant disponible :
 
-- `FStulWeaponPresentationData`, dans `Public/Weapons/Presentation/StulWeaponPresentationTypes.h`, regroupe les références facultatives communes `MuzzleFlash`, `FireSound`, `DefaultImpactEffect` et `DefaultImpactSound`, les maps `ImpactEffectsBySurface` et `ImpactSoundsBySurface`, ainsi que `MuzzleColor` ;
+- `FStulWeaponPresentationData`, dans `Public/Weapons/Presentation/StulWeaponPresentationTypes.h`, regroupe les références facultatives propres au tir de l'arme : `MuzzleFlash`, `FireSound` et `MuzzleColor` ;
 - `FStulWeaponTracerData` regroupe le Niagara et les paramètres `Color`, `Speed`, `Length` et `Width`. `UStulWeaponDefinition::HitscanTracer` expose ce bloc uniquement lorsque `ShotType` vaut `Hitscan`, afin de ne pas masquer les autres présentations utiles aux armes à projectile ;
 - `UStulWeaponDefinition::Presentation` contient cette structure directement afin de tester le workflow sans introduire prématurément un nouveau Data Asset ou un système de fragments ;
 - dans le panneau Details, `ShotType` est placé dans `Shooting|General` avant les données qu'il conditionne. Les données audiovisuelles sont affichées sous `Visual|Effects` et les structures utilisent `ShowOnlyInnerProperties`, ce qui supprime les niveaux redondants tels que `HitscanTracer > Hitscan Tracer` sans renommer les propriétés sérialisées existantes ;
-- le Data Asset n'expose plus que quatre grandes familles fonctionnelles : `Initialization`, `Display`, `Shooting` et `Visual`. Les modes de tir, timings, chargeur, reload, spread, patterns, pénétration, ballistique et recoil sont des sous-catégories de `Shooting`, tandis que mesh, attachements, animation et effets Fire/Tracer/Impact sont regroupés sous `Visual` ;
-- toutes les références sont souples et rejoignent `GetPresentationAssetPaths`, donc elles sont préchargées avec les ressources visuelles de l'arme et ne sont jamais chargées par le serveur dédié ;
+- le Data Asset n'expose plus que quatre grandes familles fonctionnelles : `Initialization`, `Display`, `Shooting` et `Visual`. Les modes de tir, timings, chargeur, reload, spread, patterns, pénétration, ballistique et recoil sont des sous-catégories de `Shooting`, tandis que mesh, attachements, animation et effets Fire/Tracer sont regroupés sous `Visual` ;
+- les définitions légères de munition et de profil d'impact sont des références directes ; leurs Niagara et sons restent des références souples ajoutées à `GetPresentationAssetPaths`, donc ces assets lourds sont préchargés côté client et ne sont jamais chargés par le serveur dédié ;
 - `AStulWeapon::GetPresentationData` et `GetHitscanTracerData` sont des `BlueprintNativeEvent`. Leurs implémentations par défaut copient les données de la Weapon Definition, mais un projet peut les surcharger pour appliquer quelques choix runtime sans modifier les Gameplay Cues ;
 - un champ vide est intentionnel et le cue doit simplement ignorer l'effet correspondant ; une référence renseignée mais absente après le préchargement reste une erreur d'initialisation de l'arme ;
 - la dépendance publique `Niagara` a été ajoutée car la structure publique expose des `TSoftObjectPtr<UNiagaraSystem>` ;
 - UnrealHeaderTool, la compilation du module et l'édition de liens de `Boston_ProjectEditor Win64 Development` réussissent après cette tranche.
 
-Pour le premier test, les Gameplay Cues récupèrent `MyTarget`, le castent en `AStulWeapon`, puis jouent uniquement les références configurées. Le tracer utilise le `UGameplayCueNotify_Static` natif `UStulWeaponTracerCue`, appelle `GetHitscanTracerData` et reconstruit son extrémité avec `Location + Normal * RawMagnitude`. Les soft references ont déjà été préchargées par l'arme ; le cue ne démarre aucun chargement synchrone ou asynchrone au moment du tir.
+Pour le premier test, les Gameplay Cues jouent uniquement les références configurées. Le tracer récupère l'arme via `MyTarget`, utilise le `UGameplayCueNotify_Static` natif `UStulWeaponTracerCue`, appelle `GetHitscanTracerData` et reconstruit son extrémité avec `Location + Normal * RawMagnitude`. Les soft references ont déjà été préchargées par l'arme ; aucun cue ne démarre de chargement synchrone ou asynchrone au moment du tir.
 
-Après avoir créé le composant Niagara du muzzle, le cue `Fire` applique `MuzzleColor` avec `Set Niagara Variable (Linear Color)` sur le paramètre standard `User.MuzzleColor`. Le cue natif `Tracer` crée `NS_BulletBeam` avec le pool `AutoRelease`, renseigne les paramètres `User.Start`, `User.Target`, `User.Color`, `User.Speed`, `User.Length` et `User.Width`, puis active le composant afin qu'aucune frame ne soit simulée avec les valeurs par défaut.
+Après avoir créé le composant Niagara du muzzle, le cue `Fire` applique `MuzzleColor` avec `Set Niagara Variable (Linear Color)` sur le paramètre standard `User.MuzzleColor`. Le cue natif `Tracer` crée `NS_BulletBeam` depuis le pool Niagara, renseigne les paramètres `User.Start`, `User.Target`, `User.Color`, `User.Speed`, `User.Length` et `User.Width`, puis active le composant afin qu'aucune frame ne soit simulée avec les valeurs par défaut.
 
-Le cue `Impact` récupère le `PhysicalMaterial` depuis ses paramètres ou le `HitResult` de l'`EffectContext`, en déduit le `SurfaceType`, cherche d'abord ce type dans `ImpactEffectsBySurface` et `ImpactSoundsBySurface`, puis utilise `DefaultImpactEffect` et `DefaultImpactSound` comme fallbacks indépendants. Les traces hitscan demandaient déjà le Physical Material ; la collision projectile utilise désormais `bReturnMaterialOnMove` afin de fournir la même information.
+Le tracer utilise le pooling Niagara `AutoRelease`. Le système Niagara doit donc atteindre naturellement l'état `Complete` ; un système qui boucle doit être corrigé dans l'asset plutôt que masqué par un timer C++. Lorsqu'un hit bloquant existe, le payload utilise explicitement son `ImpactPoint` comme extrémité ; aucune pénétration implicite n'est appliquée.
 
-UnrealHeaderTool et la compilation C++ de cette extension passent. La confirmation du lien reste à relancer après fermeture de l'éditeur : `UnrealEditor-StulWeaponSystem.dll` était verrouillée par `UnrealEditor.exe` via le débogueur Rider lors de la dernière tentative.
+`UStulAmmoDefinition` représente désormais le payload indépendamment du mode de déplacement choisi par l'arme. Sa première version ne contient volontairement aucun modificateur de dégâts ni donnée hitscan/projectile : elle référence seulement un `UStulImpactProfile`. `UStulWeaponDefinition::DefaultAmmo` sélectionne la munition, et `AStulWeapon::GetCurrentAmmoDefinition` constitue le point d'extension d'un éventuel changement runtime futur.
+
+`UStulImpactProfile` regroupe un `DefaultResponse` et les `ResponsesBySurface`. Chaque réponse contient des soft references indépendantes vers un Niagara et un son ; un champ absent dans une réponse de surface hérite du champ correspondant du fallback. Le cue `Impact` récupère la munition capturée dans `SourceObject`, résout le `PhysicalMaterial` depuis ses paramètres ou le `HitResult`, puis joue la réponse déjà préchargée. Les projectiles capturent leur munition au lancement afin qu'un futur changement de munition ne modifie pas un projectile déjà en vol.
+
+Les trois types primaires `StulWeaponDefinition`, `StulAmmoDefinition` et `StulImpactProfile` doivent être enregistrés dans l'Asset Manager du projet consommateur. Les validations éditeur signalent une arme sans munition, une munition sans profil et un profil entièrement vide.
+
+UnrealHeaderTool et la compilation C++ `Boston_ProjectEditor Win64 Development -NoLink` de cette extension passent.
 
 Évolutions à différer jusqu'à leur premier besoin concret :
 
@@ -301,22 +307,22 @@ UnrealHeaderTool et la compilation C++ de cette extension passent. La confirmati
 
 Les abilities fondamentales de visée et de rechargement sont désormais implémentées sans reprendre les timelines et événements par frame de Boston :
 
-- `UStulWeaponAimAbility` est une ability `LocalPredicted` maintenue tant que `Stul.Weapon.Input.Aim` reste appuyé. Elle possède `Stul.Weapon.State.Aiming`, attend la release avec `UAbilityTask_WaitInputRelease` et peut interrompre un rechargement ;
-- `AStulWeapon` observe désormais directement `Stul.Weapon.State.Aiming`, qui constitue la source de vérité. Il calcule `GetAimAlpha` à partir du temps de transition sans Tick, événement par frame ou réplication continue ; `IsFullyAimed` est un état dérivé de cet alpha ;
-- les Gameplay Events ponctuels `Aim.Start` et `Aim.End` sont conservés pour les consommateurs ayant besoin d'un payload. Le delegate `OnAimStateChanged` est diffusé par l'arme à partir du changement de tag, sans appel direct redondant depuis l'ability ;
+- `UStulWeaponAimAbility` est une ability `LocalPredicted` maintenue tant que `Stul.Weapon.Input.Aim` reste appuyé. Elle possède `Stul.Weapon.State.Aiming`, attend la release avec `UAbilityTask_WaitInputRelease` et reste bloquée pendant un rechargement ;
+- `Stul.Weapon.State.Aiming` reste l'état gameplay interne de l'ability. Un Gameplay Cue actif `GameplayCue.Stul.Weapon.Aim` transporte uniquement sa présentation vers le propriétaire et les simulated proxies, y compris lors d'une pertinence tardive. L'arme calcule `GetAimAlpha` à partir de cette transition sans réplication continue ;
+- `OnAimStateChanged` et `IsAiming()` restent le contrat public Blueprint/MVVM. Les anciens Gameplay Events locaux `Aim.Start` et `Aim.End` ont été supprimés : un ViewModel doit observer le delegate de l'arme équipée puis relire l'état lors de son binding, sans dépendre d'un message éphémère ;
 - `UStulWeaponAimComponent` se place sur le Character, à côté du Manager. Il suit l'arme équipée, capture sa transform de repos après attachement puis aligne localement son `AimSocket` avec la vue fournie par `IStulWeaponOwnerInterface`. Comme l'ancienne AnimInstance de Boston, la caméra et le socket sont résolus dans le même espace relatif — celui du composant d'attachement — puis le root de l'arme remplace la main IK comme transform pilotée. L'échelle de repos est intégrée au calcul de position au lieu d'être remplacée après résolution. Son Tick reste désactivé hors transition et hors visée complète ;
 - le Manager expose `GetAimAlpha` et `IsFullyAimed` comme raccourcis, mais l'arme reste propriétaire de ces valeurs. Une arme déséquipée annule ses actions transitoires et remet immédiatement son alpha à zéro ;
 - `FStulWeaponAimData`, conservé dans `StulWeaponTypes.h`, fournit pour l'instant `Magnification` et `AimSocketName`. `AStulWeapon::GetAimData` et `GetAimTransform` forment les points de résolution destinés à une future lunette sans coupler le plugin à une caméra FPS/TPS ;
 - la caméra et l'animation du projet consommateur doivent écouter `OnAimStateChanged` puis interpoler localement. Aucun alpha de visée n'est envoyé par GAS à chaque frame ;
 - `UStulWeaponReloadAbility` est `LocalPredicted`, possède `Stul.Weapon.State.Reloading`, annule tir et visée, puis utilise `UAbilityTask_WaitDelay` ;
-- `State.Reloading` est désormais la source de vérité du début de rechargement. `AStulWeapon` écoute directement son ASC et traduit les Gameplay Events `Reload.Commit`, `Reload.Completed` et `Reload.Cancelled` vers ses delegates Blueprint ; l'ability n'appelle plus de fonctions `NotifyReload...` redondantes ;
+- `State.Reloading` reste la source de vérité gameplay de l'ability. Un Gameplay Cue actif `GameplayCue.Stul.Weapon.Reload` fournit l'état public persistant, tandis que les Cues ponctuels `Reload.Commit`, `Reload.Completed` et `Reload.Cancelled` alimentent les delegates Blueprint ;
 - après un délai prédit, seul le serveur applique `UStulWeaponAmmoRestoreEffect` à `CurrentAmmo`. Le client propriétaire suit localement la quantité attendue afin que les reloads incrémentaux progressent sans tenter d'appliquer un Gameplay Effect hors fenêtre de prédiction ; l'attribut autoritaire est ensuite répliqué au propriétaire ;
-- les événements de reload sont remis directement au même ASC via `HandleGameplayEvent`, sans nouvelle recherche de composant depuis l'Actor. Après une restauration autoritaire réussie, l'ASC force une mise à jour réseau afin que l'effet instantané soit rapidement visible sur le client propriétaire ;
-- la fin locale prédite d'un reload réussi ne réplique pas `EndAbility` vers le serveur : le minuteur client peut finir avant le minuteur autoritaire et ne doit pas interrompre la restauration serveur. Seule l'autorité réplique la terminaison réussie ;
+- le démarrage du reload est prédit immédiatement. Les commits de munitions et les Cues ponctuels correspondants sont autoritaires ; après une restauration réussie, l'ASC force une mise à jour réseau afin que l'effet instantané soit rapidement visible sur le client propriétaire ;
+- une fin locale normale ne termine plus l'ability : le propriétaire conserve `State.Reloading` jusqu'à la terminaison répliquée par le serveur. Fire ne peut donc pas être prédit dans une fenêtre où le serveur considère encore le reload actif ;
 - le mode `Full` attend une fois puis restaure toutes les munitions manquantes. Le mode `Custom` attend et restaure `BaseAmmoToReload` à chaque cycle jusqu'au plein ou jusqu'à une interruption ;
-- démarrer un rechargement annule un tir actif et fait sortir de la visée, comme dans l'implémentation Boston de référence. Pendant un rechargement, une tentative de tir est bloquée sans annuler le reload, tandis qu'une nouvelle visée peut commencer sans l'interrompre. Le changement de mode de tir reste indépendant et n'annule aucune ability ;
-- `UStulWeaponAmmoRestoreEffect` applique la magnitude positive `Stul.Weapon.SetByCaller.AmmoRestore` à `CurrentAmmo`. `OnReloadCommit` et `Stul.Weapon.Event.Reload.Commit` sont émis à chaque restauration atomique, ce qui permet de synchroniser une animation ou un son par cartouche ;
-- les événements de fin distinguent `Reload.Completed` de `Reload.Cancelled` à partir de `bWasCancelled`, qui reste fiable lorsqu'une fin autoritaire arrive avant la fin locale prédite. Un rechargement incrémental interrompu conserve les cartouches déjà insérées ;
+- démarrer un rechargement fait sortir de la visée. Aim et ChangeFireMode restent bloqués pendant le reload ; Fire refuse un reload `Full` et suit le contrat d'interruption explicite déjà défini pour un reload `Custom` ;
+- `UStulWeaponAmmoRestoreEffect` applique la magnitude positive `Stul.Weapon.SetByCaller.AmmoRestore` à `CurrentAmmo`. `OnReloadCommit` est diffusé par le Cue autoritaire de chaque restauration atomique, ce qui permet de synchroniser une animation ou un son par cartouche sur tous les rôles ;
+- les Cues de fin distinguent `Reload.Completed` de `Reload.Cancelled` à partir de `bWasCancelled`. Un rechargement incrémental interrompu conserve les cartouches déjà insérées ;
 - les propriétés et attributs `AimSpeed` et `ReloadSpeed`, qui contenaient en réalité des secondes, sont renommés `AimDuration` et `ReloadDuration`. Les Weapon Definitions de test doivent être vérifiées et réenregistrées après recompilation ;
 - aucune réserve de munitions n'est encore imposée. La future intégration devra consulter une source de munitions facultative fournie par le projet, sans lier le plugin à un inventaire particulier.
 
@@ -351,7 +357,7 @@ Avant le prochain test PIE, ouvrir la Weapon Definition de test et :
 1. ajouter `UStulWeaponChangeFireModeAbility` dans `BaseAbilities` ;
 2. lui associer `Stul.Weapon.Input.ChangeFireMode` ;
 3. régler `BaseFireModeChangeDuration`, par exemple à `0.5 s` pour rendre la transition visible ;
-4. vérifier que l'input du projet passe uniquement par le Manager et n'appelle plus directement `CycleFireMode`.
+4. vérifier que l'input du projet passe uniquement par le Manager et active l'ability associée à `Stul.Weapon.Input.ChangeFireMode`.
 
 Matrice de test à reprendre :
 
@@ -396,6 +402,22 @@ Tests PIE à effectuer sur le joueur serveur et le client propriétaire :
 
 UnrealHeaderTool et les compilations C++ du module réussissent après cette tranche. L'édition de liens reste à relancer après fermeture de l'éditeur : `UnrealEditor-StulWeaponSystem.dll` est verrouillée par `UnrealEditor.exe` via le débogueur Rider.
 
+## Point de reprise — création des Data Assets de munition et d'impact
+
+Le code C++ de `UStulAmmoDefinition`, `UStulImpactProfile` et du Gameplay Cue `Impact` est en place. Les types primaires `StulAmmoDefinition` et `StulImpactProfile` sont déjà enregistrés dans `Config/DefaultGame.ini` avec les chemins `/Game` et `/StulWeaponSystem`. Aucun `.uasset` de test correspondant n'a encore été créé dans le projet.
+
+Prochaine étape à effectuer dans l'éditeur :
+
+1. créer un `UStulImpactProfile` de test et renseigner au minimum son `DefaultResponse` avec un Niagara, un son ou les deux ;
+2. ajouter si utile une réponse propre à une Physical Surface afin de valider l'héritage indépendant de l'effet et du son depuis le fallback ;
+3. créer un `UStulAmmoDefinition` de test et lui affecter ce profil dans `ImpactProfile` ;
+4. affecter cette munition au champ `DefaultAmmo` de la Weapon Definition utilisée par le banc de test ;
+5. sauvegarder les trois Data Assets, lancer leur validation et vérifier que leurs Primary Asset IDs sont correctement détectés ;
+6. tester en PIE les impacts hitscan puis projectile, sur serveur et client propriétaire, avec au moins la surface par défaut et une surface spécialisée ;
+7. confirmer que le cue joue uniquement les ressources préchargées, qu'aucun avertissement de ressource absente n'apparaît et qu'un projectile conserve la munition capturée lors de son lancement.
+
+Ne pas enrichir encore la munition avec des multiplicateurs de dégâts, des données hitscan/projectile ou un système d'override composé : ces extensions restent différées jusqu'à ce qu'un besoin concret apparaisse pendant l'intégration.
+
 ## Vérifications en attente
 
 - La compilation manuelle et le premier test PIE multijoueur ont validé les chemins exercés du Manager, de la Fast Array et de l'ASC. La matrice réseau complète décrite ci-dessus reste à exécuter.
@@ -405,6 +427,39 @@ UnrealHeaderTool et les compilations C++ du module réussissent après cette tra
 - Après le changement de type de `AvailableFireModes` vers `FGameplayTagContainer`, vérifier leur contenu et réenregistrer les Data Assets existants.
 - Vérifier la référence `RecoilCurve` après son passage en soft reference.
 - Rafraîchir les nœuds Blueprint utilisant `ProcessAbilityInput`, l’ancien `MakeInstanceData`, `Level` ou `Seed`.
+
+## Passe de correction — 21 septembre 2026
+
+- Toute weapon ability autre que `OnSpawn` exige désormais que son Avatar soit l'arme équipée du `UStulWeaponManagerComponent`. Le Manager reste l'unique source de vérité et le serveur applique la même condition lors de l'activation autoritaire.
+- Le mode de tir ne possède plus de chemin direct `SetCurrentFireMode`, `CycleFireMode` ou `ServerCycleFireMode`. Seule `UStulWeaponChangeFireModeAbility` peut atteindre le commit privé, en conservant tags, exclusions, délai, annulation et prédiction GAS.
+- `UStulWeaponAimComponent` ne ticke plus pour rechercher son Manager ou attendre un attachement. Il réagit aux delegates d'équipement, de possession, de disponibilité de l'arme et de transform du root ; le Tick ne sert plus qu'à l'interpolation visuelle. L'ancienne arme retrouve son transform hip avant un changement ou un déséquipement.
+- `AStulWeapon` réinitialise son ActorInfo lors d'un changement de propriétaire ou de Controller. Le Pawn reste l'OwnerActor GAS et l'arme reste l'AvatarActor. Le rôle autonome d'une arme de joueur distant est recalculé au même endroit côté serveur.
+- Les specs ne stockent plus l'arme comme `SourceObject` et la base Ability ne possède plus ce fallback : l'AvatarActor est l'unique chemin pour résoudre l'arme runtime.
+- `K2_OnLocalShotPresentation` remplace l'ambigu `K2_OnShotExecuted`. Ce callback est cosmétique et limité à l'instance localement contrôlée ; le gameplay d'impact autoritaire reste dans `K2_OnAuthoritativeHit` et les Gameplay Events.
+- `FGameplayAbilityTargetData_StulWeaponShot` ne déclare plus d'endpoint : elle contient uniquement l'origine de vue, la direction et la séquence. La portée continue d'être reconstruite depuis la Weapon Definition.
+- Les Gameplay Cues restent à leur emplacement actuel. Leur éventuelle réorganisation de contenu doit être effectuée séparément dans l'éditeur et ne fait pas partie de cette passe de code.
+- Niagara est déclaré comme plugin requis. `GameplayTasks`, `Niagara` et `PhysicsCore` sont des dépendances privées du module ; seules les dépendances présentes dans l'API publique restent publiques.
+- Les champs de scaling, spread dynamique, pénétration et recoil volontairement différés apparaissent sous `Shooting|Deferred` dans les Data Assets.
+- Deux tests Automation couvrent le contrat et la sérialisation de la Target Data ainsi que les calculs déterministes de direction et de muzzle. Ils passent sous `StulWeaponSystem.Shooting`.
+
+## Deuxième passe réseau — 21 septembre 2026
+
+- Aim, Reload et la transition de mode exposent maintenant leur état public par des Gameplay Cues actifs. Le propriétaire les démarre avec la prédiction GAS ; l'autorité les réplique aux simulated proxies et leur état actif permet une reconstruction lors d'une pertinence tardive. Les delegates Blueprint de `AStulWeapon` restent le contrat de présentation et l'API destinée à un futur ViewModel.
+- Le Reload ne termine plus normalement sur l'horloge locale. Le propriétaire conserve l'ability et `State.Reloading` jusqu'à la fin autoritaire ; les restaurations de munitions, les commits de présentation et la distinction Completed/Cancelled viennent du serveur. Les interruptions explicites du reload `Custom` conservent leur flux coordonné avec Fire.
+- Le serveur valide toujours l'origine et la direction client, mais reconstruit désormais l'origine effective de la trace depuis son propre viewpoint. La direction client reste acceptée à l'intérieur du cône configuré pour ne pas prétendre remplacer une future compensation de latence.
+- Le cycle canonique des Fire Modes est centralisé et partagé par le runtime et la validation. Une définition valide ne peut contenir que Single, Burst et Automatic.
+- La validation refuse aussi les patterns dont le nombre de points diffère de leur clé, les niveaux d'Ability invalides, les classes accordées plusieurs fois, les Input Tags inutiles et plusieurs mappings consommateurs du même input.
+- `WeaponManager Ready` est maintenant un jalon local sans course avec la Fast Array : le serveur réplique un succès et le nombre d'armes attendu, puis chaque rôle attend la résolution et l'initialisation locale des Actors ainsi que l'arme auto-équipée attendue. Un échec partiel ne produit jamais Ready ; un loadout vide reste valide.
+- Les tests Automation couvrent aussi la reconstruction d'une vue serveur et les invariants principaux de validation des Weapon Definitions. Leur exécution reste à effectuer dans l'Editor ou par commandlet lorsque le lancement d'Unreal est autorisé.
+
+## Validation réseau et contrat d'impact autoritaire — 22 septembre 2026
+
+- La comparaison angulaire entre la direction du tir et la rotation serveur instantanée a été supprimée. Les tests PIE ont montré une origine synchronisée à moins de `0,1 cm`, mais une rotation serveur retardée pouvant dépasser `50°` pendant un flick légitime. Le seuil fixe produisait donc de faux rejets.
+- Le diagnostic `bLogViewValidation`, le seuil `MaxClientAimErrorDegrees` et leurs logs ont été supprimés après avoir rempli leur rôle. La validation conserve les données finies, la direction non nulle, l'origine reconstruite par le serveur, la tolérance d'origine, la séquence, la cadence, le coût et l'autorité.
+- Le plugin ne choisit et n'applique aucun Gameplay Effect de dégâts. `BaseDamage` et l'attribut runtime `Damage` décrivent la puissance produite par l'arme, tandis que le projet consommateur reste responsable de la santé, des résistances, des équipes et de la mort.
+- `AStulWeapon::HandleAuthoritativeHit` reste le point commun hitscan/projectile. Il exécute le cue d'impact, envoie `Stul.Weapon.Event.Hit` à l'ASC éventuel de la cible avec le `FHitResult` et la magnitude, puis diffuse `OnAuthoritativeHit` sur le serveur.
+- `UStulAmmoDefinition` reste limité au payload de munition et à son profil de présentation d'impact. Il ne référence aucun Gameplay Effect propre au projet hôte.
+- UnrealHeaderTool et la compilation C++ `Boston_ProjectEditor Win64 Development -NoLink` réussissent. Les tests Automation et PIE restent à effectuer dans l'éditeur.
 
 ## Convention de journalisation
 
@@ -416,3 +471,228 @@ UnrealHeaderTool et les compilations C++ du module réussissent après cette tra
 - Toute nouvelle fonctionnalité doit journaliser ses chemins d’erreur importants au moment de son implémentation afin d’éviter une passe de logs ultérieure.
 - Les conditions `if` et les appels `UE_LOG` restent sur une seule ligne afin de respecter la convention de lisibilité du projet.
 - La présentation des `.h` et `.cpp` suit les bannières de catégories définies dans `AGENTS.md`, qui constitue la référence principale des conventions de code. Ce fichier conserve seulement ce rappel, tandis que `AGENTS.md` porte la règle obligatoire.
+
+## Correction du cycle de vie GAS — 21 septembre 2026
+
+- `AStulWeapon::SetOwner` peut être appelé pendant le spawn avant l'enregistrement de l'ASC. Le nettoyage de l'ActorInfo est désormais ignoré tant que l'arme ne l'a pas réellement initialisé, ce qui évite le `check(AbilityActorInfo.IsValid())` de `UAbilitySystemComponent::ClearActorInfo`.
+- Comme dans Lyra, une désinitialisation ne modifie l'ASC que si l'arme en est encore l'Avatar. Tant que l'Owner GAS existe, seul l'Avatar est retiré avec `SetAvatarActor(nullptr)` ; `ClearActorInfo()` est réservé à l'absence d'Owner.
+- Une association Owner/Avatar déjà correcte et un changement de Controller utilisent `RefreshAbilityActorInfo()` au lieu de vider puis reconstruire l'ActorInfo.
+- `Boston_ProjectEditor Win64 Development` compile et lie avec succès après cette correction. Le redémarrage PIE et les transitions possession/respawn restent à valider manuellement dans l'éditeur.
+
+## Passe de simplification GAS et tir — 21 septembre 2026
+
+- Le routage d'input suit désormais le modèle Lyra : les tags restent dans les `DynamicSpecSourceTags` des specs, mais l'index redondant `InputBindings` et sa maintenance ont été supprimés. Pressed, Held et Released continuent de stocker les handles résolus depuis les specs correspondantes.
+- Plusieurs abilities peuvent partager un même Input Tag. La validation conserve l'interdiction d'accorder deux fois la même classe, mais ne rejette plus deux classes distinctes consommant le même input.
+- La politique `OnSpawn` est centralisée dans `UStulWeaponGameplayAbility`, tentée lors de l'attribution de la spec, lors de l'installation d'un nouvel Avatar et lorsque l'arme devient Ready. Ce troisième jalon reste nécessaire car, contrairement à Lyra, l'arme attend aussi sa Definition et ses assets runtime.
+- La désinitialisation GAS annule les abilities actives, vide les inputs et retire les Gameplay Cues avant de détacher l'Avatar. Elle reste protégée contre les appels précédant l'enregistrement de l'ASC et ne modifie pas un ASC déjà associé à un autre Avatar.
+- Fire ne recherche plus ni ne caste l'instance de Reload. Un reload `Custom` est annulé par les tags GAS uniquement si Fire réussit son activation et son coût ; à chargeur vide, Fire échoue et le reload continue sans tir mis en attente. Un reload `Full` reste bloquant.
+- Les callbacks Blueprint de l'ability `K2_OnLocalShotPresentation` et `K2_OnAuthoritativeHit` ont été supprimés. Les Gameplay Events restent le contrat gameplay/mods, les Gameplay Cues le contrat cosmétique réseau et les delegates de l'arme le contrat Blueprint local.
+- Les delegates de tir sont maintenant explicites : `OnLocalFiringStarted`, `OnLocalShotExecuted` et `OnLocalFiringEnded`. `OnAuthoritativeHit` est diffusé uniquement par l'autorité après un hit confirmé.
+- Hitscan et projectile utilisent le pipeline commun `AStulWeapon::HandleAuthoritativeHit`, qui exécute le Cue d'impact, envoie `Stul.Weapon.Event.Hit` à l'ASC éventuel de la cible et diffuse le delegate serveur.
+- Les chemins d'assets runtime sont collectés par un helper unique, les requêtes d'état Aim/Reload/ChangeFireMode partagent le même helper et le `BeginPlay` vide de l'arme a été supprimé.
+- UnrealHeaderTool ainsi que `Boston_ProjectEditor Win64 Development` compilent et lient avec succès. Les Blueprints qui utilisaient les anciens delegates ou callbacks K2 doivent être rafraîchis lors du prochain passage dans l'éditeur.
+
+## Agrégation des tirs logiques — 21 septembre 2026
+
+- `FStulWeaponShotExecution` représente maintenant un tir logique identifié par sa `ShotSequence` et regroupe tous ses résultats de pellets ou projectiles. Le numéro est exposé en `int32` dans cette structure Blueprint, tandis que la Target Data réseau conserve son `uint16` compact.
+- `UStulWeaponFireAbility` centralise Start, Shot et End dans trois fonctions `Dispatch...`. Chacune appelle directement le handler privé de l'arme puis publie le Gameplay Event correspondant avec `UGameplayAbility::SendGameplayEvent`.
+- `Event.Fire.Shot` est émis une seule fois après la boucle des projectiles. Il ne crée plus de `FGameplayAbilityTargetData_SingleTargetHit` par résultat ; les réactions individuelles aux impacts restent portées par `Event.Hit`.
+- `AStulWeapon` ne s'abonne pas aux événements de son propre ASC. Ses handlers privés diffusent les delegates uniquement au propriétaire local, exécutent le Fire Cue une fois par tir logique et conservent un Tracer Cue par résultat hitscan.
+- Les anciennes fonctions publiques `NotifyLocal...`, ainsi que `NotifyShotExecuted` et `SendWeaponEvent`, ont été supprimées. Le delegate `OnLocalShotExecuted` transporte désormais le tir agrégé complet.
+- UnrealHeaderTool et `Boston_ProjectEditor Win64 Development` compilent et lient avec succès après ce refactor.
+
+## Corrections projectile et validation verticale — 22 septembre 2026
+
+- Les fonctions de publication sémantique de Fire sont renommées `DispatchFiringStarted`, `DispatchShotExecuted` et `DispatchFiringEnded` afin de distinguer clairement le producteur des handlers consommateurs de l'arme.
+- La validation serveur conserve l'origine fournie par le bridge de vue, mais compare maintenant la direction cliente à `APawn::GetBaseAimRotation()`. Cette rotation inclut le pitch réseau du Pawn distant, contrairement à une Camera Component Blueprint qui peut rester horizontale sur le serveur.
+- Le projectile et le root de collision de son propriétaire s'ignorent désormais réciproquement pendant le déplacement. Cette relation est retirée dans `EndPlay`, ce qui empêche le capsule sweep du tireur d'être freiné par ses propres projectiles sans empêcher ceux-ci de toucher les autres Pawns.
+- Tous les `UPrimitiveComponent` placés sous `UProjectileVisualComponent` sont forcés en présentation pure : physique, overlaps et collision désactivés.
+- Sur le client propriétaire, le projectile répliqué initialise sa convergence depuis le muzzle local de l'arme. L'origine gameplay, la trajectoire et le spawn restent entièrement serveur-autoritaires.
+- UnrealHeaderTool et la compilation C++ `Boston_ProjectEditor Win64 Development -NoLink` réussissent. Le lien final reste à relancer après fermeture de la session Rider/LLDB qui verrouille `UnrealEditor-StulWeaponSystem.dll`.
+
+## Prédiction locale ADS et projectile — 22 septembre 2026
+
+- `UStulWeaponAimAbility` déclenche maintenant directement la transition de présentation sur le propriétaire local après son commit prédit. Le Gameplay Cue Aim reste le contrat réseau pour les autres rôles ; le handler de l'arme est idempotent afin que la Cue prédite ne redémarre pas la transition.
+- Les tirs projectile locaux créent immédiatement une instance cosmétique de la classe projectile configurée. Cette instance est explicitement non répliquée, ne peut jamais exécuter `HandleAuthoritativeImpact` et utilise le même snapshot de direction, vitesse, gravité et durée de vie que le projectile serveur.
+- `FStulWeaponProjectilePredictionKey` corrèle le proxy et le projectile autoritaire avec la prediction key d'activation GAS, la `ShotSequence` et le `ProjectileIndex`. Une petite map transitoire dans l'arme conserve uniquement les proxies en attente de confirmation.
+- À la réception du projectile serveur, le propriétaire reprend la position courante du composant visuel prédit, détruit le proxy et réutilise la convergence existante pour résorber progressivement l'écart avec la trajectoire autoritaire. Les simulated proxies distants continuent d'utiliser uniquement le projectile serveur.
+- Un proxy non confirmé s'autodétruit après `PredictedConfirmationTimeout`, fixé à une seconde par défaut. Sa collision reste strictement cosmétique : elle peut arrêter localement la représentation, mais elle ne publie ni hit, ni dégâts, ni Gameplay Event.
+- UnrealHeaderTool et la compilation C++ `Boston_ProjectEditor Win64 Development -NoLink` réussissent. Le lien final reste bloqué uniquement par la DLL chargée dans la session Unreal/Rider active.
+
+### Point de reprise
+
+Le code est prêt pour la validation PIE, mais la DLL finale n'a pas pu être reliée parce que `UnrealEditor-StulWeaponSystem.dll` était encore chargée par Unreal Editor sous Rider/LLDB. À la reprise, fermer l'éditeur, compiler normalement `Boston_ProjectEditor Win64 Development`, puis lancer Dedicated Server avec deux joueurs.
+
+Vérifier d'abord sans émulation, puis avec 100 ms de latence :
+
+1. l'ADS doit commencer pendant la frame de l'input et conserver uniquement la durée de transition configurée par `AimDuration` ;
+2. le projectile cosmétique doit apparaître immédiatement au muzzle sur le propriétaire ;
+3. l'arrivée du projectile serveur ne doit produire ni second trail persistant, ni saut visible, ni double son ;
+4. les tirs en strafe et pendant des flicks horizontaux ou verticaux doivent conserver leur continuité visuelle ;
+5. Single, Burst, Automatic et plusieurs projectiles par tir doivent produire une clé distincte par projectile et un seul handoff correspondant ;
+6. un tir contre un mur proche doit arrêter la prédiction localement, tandis que l'impact gameplay et les dégâts restent exclusivement autoritaires ;
+7. avec 1 à 5 % de packet loss, un proxy jamais confirmé doit être nettoyé par `PredictedConfirmationTimeout` ;
+8. le second client doit voir uniquement les projectiles serveur, sans proxy local supplémentaire.
+
+Le principal risque visuel à observer est la réinitialisation du Niagara du Blueprint projectile lors du handoff : la position est reprise depuis le proxy, mais `K2_OnProjectileInitialized` est exécuté sur l'instance réelle. Si un bref redémarrage reste perceptible, la prochaine tranche devra traiter le transfert ou la continuité de la représentation Niagara sans modifier la simulation autoritaire.
+
+## Reprise — 23 septembre 2026
+
+- Unreal Editor n'était plus actif et ne verrouillait plus la DLL du plugin.
+- La compilation complète `Boston_ProjectEditor Win64 Development` réussit, y compris UnrealHeaderTool et le link de `UnrealEditor-StulWeaponSystem.dll`.
+- Aucun changement C++ supplémentaire n'a été nécessaire.
+- Le prochain jalon reste la validation PIE Dedicated Server à deux joueurs décrite ci-dessus, d'abord sans émulation réseau puis avec 100 ms de latence et enfin avec 1 à 5 % de packet loss.
+
+## Refonte planifiée du tir — 23 septembre 2026
+
+Les essais PIE avec le preset réseau `Average` ont révélé une limite structurelle du tir automatique actuel : chaque projectile logique transmet une Target Data avec `ServerSetReplicatedTargetData`, qui est un RPC fiable. Sous jitter ou perte de paquets, plusieurs requêtes pourtant produites à la bonne cadence peuvent arriver groupées. La validation fondée sur leur instant d'arrivée serveur les considère alors comme trop rapides et l'échec termine toute l'ability. Cela produit des arrêts côté propriétaire, des pauses visibles par les autres rôles et un comportement très instable sous mauvaises conditions réseau.
+
+Une file temporaire a été ajoutée à `UStulWeaponFireAbility` pour lisser ces arrivées, mais elle n'est pas retenue comme architecture finale. Son état reste lié au cycle de vie de l'ability : un `EndAbility` répliqué lors du relâchement peut terminer l'instance serveur et supprimer les tirs en attente avant leur résolution. Cette modification n'a pas été compilée à cause de Live Coding et devra être retirée avant la refonte. Le correctif séparé du Gameplay Cue Fire, qui résout le socket `Muzzle` localement sur chaque proxy au lieu d'utiliser directement la position capturée par le serveur, doit être conservé.
+
+### Décision d'architecture
+
+GAS reste l'orchestrateur des actions d'arme : activation prédite, tags, exclusions, coûts, attributs, états, Gameplay Effects et Gameplay Cues. Il ne doit cependant plus servir de protocole fiable haute fréquence pour chaque balle automatique. La simulation balistique, les Shot IDs, les sessions de tir, le transport spécialisé et la réconciliation doivent être placés sous la couche GAS.
+
+La frontière retenue est la suivante :
+
+```text
+Fire Abilities
+    intention, policy d'activation, permissions et durée de l'action
+        |
+        v
+UStulWeaponFireComponent
+    cadence, Shot IDs, sessions, prédiction, transport et réconciliation
+        |
+        v
+UStulWeaponShootingLibrary
+    calculs déterministes sans état, traces et données balistiques
+        |
+        v
+AStulWeapon
+    ASC, AttributeSet, Definition, delegates publics et Gameplay Cues
+```
+
+Le composant de tir exposera une primitive interne unique pour exécuter un tir logique. Un tir logique peut produire un hitscan, un projectile ou plusieurs pellets avec `ShotsPerFire`. Single demande une seule exécution ; Automatic et Burst pilotent plusieurs exécutions au moyen d'une session ou séquence. Le composant n'aura aucun Tick permanent et utilisera uniquement des timers pendant une action active.
+
+Les statistiques ne seront pas dupliquées. `UStulWeaponDefinition` reste la source de configuration, `UStulWeaponAttributeSet` la source des valeurs runtime et `AStulWeapon` la source du mode courant. Le futur composant lit ces données ou capture un snapshot immuable au début du tir.
+
+### Abilities et Activation Policies
+
+`ActivationPolicy` appartient à la configuration de classe de l'ability et ne doit pas être modifiée au runtime selon le mode de tir. Plusieurs classes concrètes très fines partageront donc une base et le composant commun, sans dupliquer les traces, projectiles, coûts ou calculs :
+
+- `UStulWeaponFireAbility` devient la base abstraite commune pour les validations GAS et l'accès au composant ;
+- `UStulWeaponFireSingleAbility` utilise `OnInputTriggered` et demande un tir unique ;
+- `UStulWeaponFireAutomaticAbility` utilise `WhileInputActive`, ouvre une session automatique et reste active jusqu'au relâchement ;
+- `UStulWeaponFireBurstAbility` utilisera d'abord `OnInputTriggered` : un appui déclenche une rafale complète et bornée.
+
+Une éventuelle variante de Burst répétée tant que l'input reste maintenu utilisera plus tard une classe concrète `WhileInputActive` partageant exactement la même logique de rafale. Ce choix ne doit pas être simulé en modifiant une policy au runtime.
+
+Une Weapon Definition supportant plusieurs modes accordera plusieurs abilities avec le même `Input.Fire`. Leur `CanActivateAbility` vérifiera le mode courant afin qu'une seule soit éligible. Cette configuration conserve aussi la sémantique attendue lors d'un changement de mode pendant que Fire est maintenu : Automatic peut démarrer grâce à `WhileInputActive`, tandis que Single exige un nouvel appui.
+
+### Hitscan et projectile
+
+Il n'est pas prévu de créer une Fire Ability propre au hitscan et une autre propre au projectile. Ces modes diffèrent par leur simulation après acceptation du tir, pas par leurs permissions GAS ni leur input. Le composant consultera `UStulWeaponDefinition::ShotType` puis appellera le chemin hitscan ou projectile approprié.
+
+Une ability séparée ne sera introduite que pour une sémantique d'action réellement différente, par exemple une charge maintenue puis relâchée, un beam continu, un lock-on, un tir secondaire ou une phase de placement.
+
+### Réseau automatique à terme
+
+L'automatique ne doit plus envoyer une Target Data fiable par balle. Sa session utilisera une identité indépendante de la Prediction Key GAS :
+
+```text
+FireSessionId + ShotSequence
+```
+
+Le protocole prévu comporte :
+
+1. une ouverture de session rare et fiable ;
+2. de petits batches de commandes `Unreliable`, avec une fenêtre glissante redondante et déduplication par séquence ;
+3. une fin de session fiable contenant `FinalSequence` et les dernières commandes ;
+4. un ACK cumulatif owner-only permettant de libérer l'historique prédit et de réconcilier les munitions.
+
+La cadence serveur sera validée sur une timeline autoritaire dérivée du début de session, de `ShotSequence`, de `FireInterval` et des règles de Burst, jamais uniquement sur l'instant d'arrivée du paquet ou sur un timestamp librement choisi par le client. Les timestamps clients resteront bornés et serviront plus tard au rewind ou au catch-up projectile.
+
+L'ACK devra pouvoir représenter les trous entre commandes acceptées et rejetées ; un simple `LastAcceptedSequence` ne suffit pas. Une forme compacte basée sur `LastProcessedSequence`, un masque récent d'acceptation et les munitions autoritaires sera évaluée. Une commande perdue ou invalide ne devra jamais annuler toute la rafale.
+
+`CurrentAmmo` restera autoritaire dans le Weapon AttributeSet. Une éventuelle valeur affichée prédite sera dérivée des coûts encore non acquittés plutôt que stockée comme seconde source de vérité.
+
+### Lag compensation et échelle
+
+Le protocole de Fire Session, les ACK et la réconciliation seront stabilisés avant toute lag compensation. Le rewind hitscan et le catch-up projectile seront des extensions séparées. Le cœur du plugin ne peut pas imposer les hitboxes historiques, portes, véhicules ou règles de santé d'un projet hôte ; la compensation devra donc passer par un provider ou subsystem optionnel.
+
+De même, `StulWeaponSystem` continue de produire un hit autoritaire et son contexte sans imposer le Gameplay Effect de santé du projet consommateur.
+
+Les projectiles lents importants, comme les roquettes ou grenades, peuvent rester des Actors répliqués. Les balles rapides à très haute fréquence devront plus tard être évaluées comme hitscan ou simulation légère plutôt que systématiquement devenir des Actors répliqués.
+
+### Ordre de reprise
+
+1. Fermer Unreal Editor afin de désactiver le verrou Live Coding.
+2. Retirer la file temporaire et son timer serveur de `UStulWeaponFireAbility`.
+3. Conserver et compiler le correctif du muzzle local dans `UStulWeaponFireCue`.
+4. Créer `UStulWeaponFireComponent` et y déplacer l'exécution d'un tir logique sans modifier son résultat fonctionnel.
+5. Réduire `UStulWeaponFireAbility` à une base abstraite légère.
+6. Ajouter et tester les abilities concrètes Single, Automatic et Burst avec leurs policies respectives.
+7. Valider les trois modes sans émulation réseau.
+8. Remplacer le transport automatique par le protocole de Fire Session spécialisé.
+9. Ajouter ACK, réconciliation des munitions et tests des séquences, doublons, pertes et fermetures.
+10. Exécuter la matrice PIE avec latence, jitter, packet loss, duplication et réordonnancement.
+11. Ajouter seulement ensuite le rewind hitscan puis le catch-up projectile.
+
+À la reprise, ne pas empiler de correctif supplémentaire dans l'ability actuelle. La prochaine tranche doit commencer par l'extraction du tir logique et la clarification des responsabilités ci-dessus.
+
+## Refonte du tir — première tranche compilable
+
+La première extraction vers le nouveau découpage est en place :
+
+- `StulWeaponFireSessionTypes` définit les rôles d'exécution, les états de session et les identités durables `FStulShotId` / `FStulProjectileId` en `uint32` ;
+- `UStulWeaponFireComponent` est un sous-composant natif répliqué de `AStulWeapon`, sans Tick permanent ;
+- `ResolveExecutionRole()` distingue `PredictiveProducer`, `AuthoritativeProducer`, `AuthoritativeConsumer` et `PresentationOnly` depuis l'arme, le Pawn et son Controller ;
+- le calcul du tir, les traces, le spawn des projectiles, les impacts et le debug ont quitté `UStulWeaponFireAbility` pour le composant ;
+- l'ability conserve provisoirement les timers, le coût GAS et l'ancien transport `TargetData`, afin que cette tranche ne modifie pas encore le protocole réseau ;
+- les anciennes Prediction Keys de projectile restent temporairement transmises au composant jusqu'à la migration vers `FStulProjectileId` et `WeaponBallisticSeed` ;
+- des Automation Tests couvrent la validité, l'égalité, le hash et la représentation des nouvelles identités.
+
+La compilation `Boston_ProjectEditor Win64 Development` réussit avec UnrealHeaderTool et le link de `UnrealEditor-StulWeaponSystem.dll`. Les Automation Tests n'ont pas été exécutés, car cela nécessiterait de lancer l'éditeur ou un commandlet.
+
+Prochaine tranche : réduire `UStulWeaponFireAbility` à une base abstraite légère, ajouter les abilities concrètes Single/Burst/Automatic et transférer leurs timers au composant avant d'introduire les RPC de Fire Session.
+
+## Refonte du tir — sessions réseau et présentation prédite
+
+La migration hors du transport GAS haute fréquence est implémentée :
+
+- `UStulWeaponFireAbility` ne possède plus de timer, de séquence ni de `TargetData` ; elle conserve le lifecycle GAS et autorise le coût de chaque tir ;
+- `UStulWeaponFireSingleAbility`, `UStulWeaponFireBurstAbility` et `UStulWeaponFireAutomaticAbility` fournissent leurs policies et vérifient leur mode respectif ;
+- le composant est l'unique producteur temporel et distingue explicitement `PredictiveProducer`, `AuthoritativeProducer`, `AuthoritativeConsumer` et `PresentationOnly` ;
+- l'ouverture serveur attend à la fois l'Open fiable et l'autorisation de l'Ability, dans n'importe quel ordre ;
+- les commandes utilisent des batches `Unreliable` redondants, une fermeture fiable avec tail, des séquences `uint32`, une fenêtre maximale de 64 et une déduplication serveur ;
+- les commandes arrivées groupées sont consommées à la cadence autoritaire au lieu d'être exécutées simultanément ou de terminer l'ability ;
+- les coûts Burst/Automatic sont commitées uniquement côté serveur, avec pending costs propriétaire et ACK atomiques ; Single conserve le coût GAS prédit dans sa fenêtre d'activation ;
+- l'état final owner-only réconcilie les sessions même si le dernier ACK périodique est perdu ;
+- `WeaponBallisticSeed` est généré par le serveur, immuable, répliqué owner-only et combiné avec `ProjectileId` ;
+- les anciennes identités projectile fondées sur `PredictionKey` et le Target Data de tir ont été supprimées ;
+- le projectile autoritaire reste la vérité gameplay, mais sa représentation est masquée chez le propriétaire lorsqu'un proxy prédit correspondant existe ; le proxy n'est plus détruit/remplacé ;
+- le muzzle, le son et l'impact hitscan autoritaires sont distribués par RPC cosmétiques `Unreliable` en ignorant le propriétaire qui les a déjà prédits.
+
+Les Automation Tests couvrent désormais les identités et les contrats élémentaires Batch/Close/ACK. Après fermeture d'Unreal Editor/LLDB, la compilation complète `Boston_ProjectEditor Win64 Development`, y compris l'édition de liens du plugin, réussit.
+
+Le Blueprint de test historique dérivé directement de `UStulWeaponFireAbility` reste compatible et sélectionne le type depuis le mode courant. Les nouvelles configurations doivent accorder les trois classes concrètes avec le même Input Tag ; seule la classe correspondant au mode courant passera `CanActivateAbility`.
+
+## Point stable — validation du tir et présentation réseau — 24 septembre 2026
+
+- Les essais PIE à deux clients valident désormais le tir Single, Burst et Automatic après les corrections de cadence, de fermeture de session et de présentation.
+- Le projectile prédit du propriétaire et le projectile autoritaire répliqué conservent leurs responsabilités distinctes. Les clients distants voient la représentation autoritaire dont le visuel démarre depuis le muzzle local de l'arme.
+- Le tracer hitscan ne prend plus le muzzle capturé par le serveur dédié comme origine visuelle. Chaque client utilise le muzzle de sa représentation locale de l'arme, tout en conservant l'endpoint autoritaire encodé dans la Gameplay Cue.
+- Le muzzle flash, le son et le tracer hitscan sont maintenant cohérents sur le propriétaire, le serveur d'écoute et les clients spectateurs lors des essais effectués.
+- Le correctif envisagé autour de l'auto-activation Niagara du projectile a été retiré : le Blueprint avait déjà `Auto Activate` désactivé et ce mécanisme n'était pas la cause du décalage observé.
+- Un test Automation couvre le contrat du tracer distant : origine au muzzle local et conservation de la cible autoritaire.
+- UnrealHeaderTool et la compilation C++ `Boston_ProjectEditor Win64 Development -NoLink` réussissent. L'édition de liens complète et les Automation Tests restent à relancer après fermeture de l'éditeur et de LLDB.
+
+### Prochaines étapes
+
+1. Exécuter la matrice réseau complète sur Dedicated Server : sans émulation, puis avec latence, jitter, perte, duplication et réordonnancement.
+2. Tester agressivement les transitions qui ont déjà révélé des régressions : reload puis Burst, relâchement/réappui rapide en Automatic, changement de mode, changement d'arme, chargeur vide et fermeture avec tail incomplète.
+3. Ajouter un ViewModel MVVM de diagnostic pour exposer les munitions autoritaires, les coûts locaux encore pending, les munitions affichées et l'état de la Fire Session.
+4. Nettoyer l'attribution des Fire Abilities afin de n'accorder que celles correspondant aux modes présents dans `AvailableFireModes`.
+5. Exécuter les Automation Tests existants et compléter uniquement les scénarios qui échouent ou les invariants réseau non encore couverts.
+6. Documenter l'intégration du plugin, notamment les Primary Asset Types, les abilities requises et la hiérarchie de présentation des projectiles.
+7. Reporter le rewind hitscan, le catch-up projectile avancé et les optimisations de projectiles haute fréquence après stabilisation et profilage de cette V1.

@@ -39,11 +39,6 @@ protected:
 	virtual void AbilitySpecInputReleased(FGameplayAbilitySpec& Spec) override;
 
 private:
-	void TryActivateAbilityOnSpawn(const FGameplayAbilitySpec& AbilitySpec);
-	void AddInputBindings(const FGameplayAbilitySpec& AbilitySpec);
-	void RemoveInputBindings(const FGameplayAbilitySpec& AbilitySpec);
-
-	TMap<FGameplayTag, TArray<FGameplayAbilitySpecHandle>> InputBindings;
 	TArray<FGameplayAbilitySpecHandle> InputPressedSpecHandles;
 	TArray<FGameplayAbilitySpecHandle> InputReleasedSpecHandles;
 	TArray<FGameplayAbilitySpecHandle> InputHeldSpecHandles;

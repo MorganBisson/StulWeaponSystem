@@ -5,6 +5,9 @@
 #include "StulWeaponAimComponent.generated.h"
 
 class AStulWeapon;
+class AController;
+class APawn;
+class USceneComponent;
 class UStulWeaponManagerComponent;
 
 /** Generic local aim presentation for projects that do not provide their own animation implementation. */
@@ -48,9 +51,11 @@ protected:
 private:
 	/************************ Internal ************************/
 	bool IsLocallyPresented() const;
-	bool ShouldWaitForLocalControl() const;
 	bool ResolveViewTransform(FTransform& OutViewTransform) const;
 	bool CaptureHipTransform();
+	void BeginHipTransformCapture();
+	void StopHipTransformCapture();
+	void RestoreWeaponPresentation();
 	void ApplyAimPresentation();
 	void BindWeapon(AStulWeapon* NewWeapon);
 
@@ -58,6 +63,11 @@ private:
 	void HandleWeaponEquipped(AStulWeapon* NewWeapon, AStulWeapon* PreviousWeapon);
 	UFUNCTION()
 	void HandleAimStateChanged(AStulWeapon* Weapon, bool bIsAiming);
+	UFUNCTION()
+	void HandleWeaponReady(AStulWeapon* Weapon);
+	UFUNCTION()
+	void HandleControllerChanged(APawn* Pawn, AController* OldController, AController* NewController);
+	void HandleWeaponRootTransformUpdated(USceneComponent* UpdatedComponent, EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport);
 
 	UPROPERTY(Transient)
 	TObjectPtr<UStulWeaponManagerComponent> WeaponManager;
@@ -66,6 +76,4 @@ private:
 
 	FTransform HipRelativeTransform = FTransform::Identity;
 	bool bHasHipTransform = false;
-	bool bPendingHipCapture = false;
-	bool bLoggedInvalidSetup = false;
 };

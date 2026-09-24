@@ -2,7 +2,6 @@
 
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
-#include "GameFramework/PlayerController.h"
 #include "Net/UnrealNetwork.h"
 #include "StulWeaponSystem.h"
 #include "Weapons/StulWeapon.h"
@@ -129,6 +128,11 @@ void UStulWeaponManagerComponent::BeginPlay()
 
 void UStulWeaponManagerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	for (const FStulWeaponEntry& Entry : WeaponList.GetEntries())
+	{
+		if (IsValid(Entry.Weapon)) Entry.Weapon->OnWeaponReady.RemoveDynamic(this, &ThisClass::HandleReplicatedWeaponReady);
+	}
+
 	if (GetOwner() && GetOwner()->HasAuthority())
 	{
 		TSet<TWeakObjectPtr<AStulWeapon>> WeaponsToDestroy;
@@ -160,7 +164,8 @@ void UStulWeaponManagerComponent::GetLifetimeReplicatedProps(TArray<FLifetimePro
 
 	DOREPLIFETIME(UStulWeaponManagerComponent, WeaponList);
 	DOREPLIFETIME(UStulWeaponManagerComponent, EquippedWeapon);
-	DOREPLIFETIME(UStulWeaponManagerComponent, bIsReady);
+	DOREPLIFETIME(UStulWeaponManagerComponent, DefaultLoadoutState);
+	DOREPLIFETIME(UStulWeaponManagerComponent, ReadyWeaponCount);
 }
 
 void UStulWeaponManagerComponent::InitializeDefaultLoadout()
@@ -171,13 +176,14 @@ void UStulWeaponManagerComponent::InitializeDefaultLoadout()
 		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon Manager '%s' rejected default loadout initialization because it must run on the server."), *GetNameSafe(this));
 		return;
 	}
-	if (bDefaultLoadoutInitializationStarted)
+	if (DefaultLoadoutState != EStulWeaponManagerLoadoutState::NotStarted)
 	{
 		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon Manager '%s' ignored repeated default loadout initialization."), *GetNameSafe(this));
 		return;
 	}
 
-	bDefaultLoadoutInitializationStarted = true;
+	DefaultLoadoutState = EStulWeaponManagerLoadoutState::Scheduling;
+	ReadyWeaponCount = INDEX_NONE;
 	const int32 WeaponsToSpawn = FMath::Min(DefaultWeaponLoadout.Num(), MaxWeaponSlots);
 	if (DefaultWeaponLoadout.Num() > MaxWeaponSlots) UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon Manager '%s' has %d default weapons but only %d slots; overflowing entries will be skipped."), *GetNameSafe(this), DefaultWeaponLoadout.Num(), MaxWeaponSlots);
 
@@ -187,6 +193,7 @@ void UStulWeaponManagerComponent::InitializeDefaultLoadout()
 		if (!WeaponDefinitionId.IsValid())
 		{
 			UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon Manager '%s' skipped invalid default weapon at index %d."), *GetNameSafe(this), LoadoutIndex);
+			FailDefaultLoadoutInitialization();
 			continue;
 		}
 
@@ -195,18 +202,50 @@ void UStulWeaponManagerComponent::InitializeDefaultLoadout()
 		SpawnAndInitializeWeapon(nullptr, InstanceData, true);
 	}
 
-	bDefaultLoadoutSchedulingComplete = true;
+	if (DefaultLoadoutState == EStulWeaponManagerLoadoutState::Scheduling) DefaultLoadoutState = EStulWeaponManagerLoadoutState::Loading;
 	CheckDefaultLoadoutReady();
+	OwnerActor->ForceNetUpdate();
+}
+
+void UStulWeaponManagerComponent::FailDefaultLoadoutInitialization()
+{
+	if (DefaultLoadoutState == EStulWeaponManagerLoadoutState::Succeeded || DefaultLoadoutState == EStulWeaponManagerLoadoutState::Failed) return;
+
+	DefaultLoadoutState = EStulWeaponManagerLoadoutState::Failed;
+	ReadyWeaponCount = INDEX_NONE;
+	UE_LOG(LogStulWeaponSystem, Error, TEXT("Weapon Manager '%s' failed to initialize its complete default loadout and will not become ready."), *GetNameSafe(this));
+	if (AActor* OwnerActor = GetOwner()) OwnerActor->ForceNetUpdate();
 }
 
 void UStulWeaponManagerComponent::CheckDefaultLoadoutReady()
 {
-	if (!bDefaultLoadoutInitializationStarted || !bDefaultLoadoutSchedulingComplete || bIsReady || !PendingDefaultLoadoutWeapons.IsEmpty()) return;
+	if (DefaultLoadoutState != EStulWeaponManagerLoadoutState::Loading || !PendingDefaultLoadoutWeapons.IsEmpty()) return;
+
+	ReadyWeaponCount = WeaponList.Num();
+	DefaultLoadoutState = EStulWeaponManagerLoadoutState::Succeeded;
+	UE_LOG(LogStulWeaponSystem, Verbose, TEXT("Weapon Manager '%s' finished initializing its default loadout."), *GetNameSafe(this));
+	RefreshReadyState();
+	if (AActor* OwnerActor = GetOwner()) OwnerActor->ForceNetUpdate();
+}
+
+bool UStulWeaponManagerComponent::CanBecomeReady() const
+{
+	if (DefaultLoadoutState != EStulWeaponManagerLoadoutState::Succeeded || ReadyWeaponCount < 0 || WeaponList.Num() != ReadyWeaponCount) return false;
+
+	for (const FStulWeaponEntry& Entry : WeaponList.GetEntries())
+	{
+		if (!IsValid(Entry.Weapon) || !Entry.Weapon->IsInitialized()) return false;
+	}
+	if (bAutoEquipFirstWeapon && ReadyWeaponCount > 0 && (!IsValid(EquippedWeapon) || !WeaponList.Contains(EquippedWeapon) || !EquippedWeapon->IsInitialized())) return false;
+	return true;
+}
+
+void UStulWeaponManagerComponent::RefreshReadyState()
+{
+	if (bIsReady || !CanBecomeReady()) return;
 
 	bIsReady = true;
-	UE_LOG(LogStulWeaponSystem, Verbose, TEXT("Weapon Manager '%s' finished initializing its default loadout."), *GetNameSafe(this));
 	OnWeaponManagerReady.Broadcast();
-	if (AActor* OwnerActor = GetOwner()) OwnerActor->ForceNetUpdate();
 }
 
 /*********************************************************************************************/
@@ -243,11 +282,13 @@ AStulWeapon* UStulWeaponManagerComponent::SpawnAndInitializeWeapon(UStulWeaponDe
 	if (!OwnerActor || !OwnerActor->HasAuthority())
 	{
 		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon Manager '%s' rejected weapon creation because it must run on the server."), *GetNameSafe(this));
+		if (bDefaultLoadoutWeapon) FailDefaultLoadoutInitialization();
 		return nullptr;
 	}
 	if (!WeaponClass)
 	{
 		UE_LOG(LogStulWeaponSystem, Error, TEXT("Weapon Manager '%s' cannot create a weapon because WeaponClass is null."), *GetNameSafe(this));
+		if (bDefaultLoadoutWeapon) FailDefaultLoadoutInitialization();
 		return nullptr;
 	}
 
@@ -255,6 +296,7 @@ AStulWeapon* UStulWeaponManagerComponent::SpawnAndInitializeWeapon(UStulWeaponDe
 	if (SlotIndex == INDEX_NONE)
 	{
 		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Weapon Manager '%s' cannot create another weapon because all %d slots are occupied or reserved."), *GetNameSafe(this), MaxWeaponSlots);
+		if (bDefaultLoadoutWeapon) FailDefaultLoadoutInitialization();
 		return nullptr;
 	}
 
@@ -262,6 +304,7 @@ AStulWeapon* UStulWeaponManagerComponent::SpawnAndInitializeWeapon(UStulWeaponDe
 	if (!World)
 	{
 		UE_LOG(LogStulWeaponSystem, Error, TEXT("Weapon Manager '%s' cannot create a weapon because its World is invalid."), *GetNameSafe(this));
+		if (bDefaultLoadoutWeapon) FailDefaultLoadoutInitialization();
 		return nullptr;
 	}
 
@@ -273,12 +316,9 @@ AStulWeapon* UStulWeaponManagerComponent::SpawnAndInitializeWeapon(UStulWeaponDe
 	if (!NewWeapon)
 	{
 		UE_LOG(LogStulWeaponSystem, Error, TEXT("Weapon Manager '%s' failed to spawn weapon class '%s'."), *GetNameSafe(this), *GetNameSafe(WeaponClass.Get()));
+		if (bDefaultLoadoutWeapon) FailDefaultLoadoutInitialization();
 		return nullptr;
 	}
-	const APawn* OwnerPawn = Cast<APawn>(OwnerActor);
-	const APlayerController* OwnerPlayerController = OwnerPawn ? Cast<APlayerController>(OwnerPawn->GetController()) : nullptr;
-	if (OwnerPlayerController && !OwnerPlayerController->IsLocalController()) NewWeapon->SetAutonomousProxy(true);
-
 	const TWeakObjectPtr<AStulWeapon> WeaponKey(NewWeapon);
 	PendingWeaponSlots.Add(WeaponKey, SlotIndex);
 	if (bDefaultLoadoutWeapon) PendingDefaultLoadoutWeapons.Add(WeaponKey);
@@ -296,12 +336,14 @@ void UStulWeaponManagerComponent::HandleInitializationStartFailure(AStulWeapon* 
 	if (!Weapon) return;
 
 	const TWeakObjectPtr<AStulWeapon> WeaponKey(Weapon);
+	const bool bWasDefaultLoadoutWeapon = PendingDefaultLoadoutWeapons.Contains(WeaponKey);
 	PendingWeaponSlots.Remove(WeaponKey);
 	PendingDefaultLoadoutWeapons.Remove(WeaponKey);
 	Weapon->OnWeaponReady.RemoveDynamic(this, &ThisClass::HandleWeaponReady);
 	Weapon->OnWeaponInitializationFailed.RemoveDynamic(this, &ThisClass::HandleWeaponInitializationFailed);
 	Weapon->OnDestroyed.RemoveDynamic(this, &ThisClass::HandleWeaponDestroyed);
 	Weapon->Destroy();
+	if (bWasDefaultLoadoutWeapon) FailDefaultLoadoutInitialization();
 	CheckDefaultLoadoutReady();
 }
 
@@ -356,7 +398,11 @@ void UStulWeaponManagerComponent::HandleWeaponDestroyed(AActor* DestroyedActor)
 		if (AActor* OwnerActor = GetOwner()) OwnerActor->ForceNetUpdate();
 	}
 
-	if (bWasPendingDefaultLoadoutWeapon) CheckDefaultLoadoutReady();
+	if (bWasPendingDefaultLoadoutWeapon)
+	{
+		FailDefaultLoadoutInitialization();
+		CheckDefaultLoadoutReady();
+	}
 }
 
 bool UStulWeaponManagerComponent::RemoveWeapon(AStulWeapon* Weapon)
@@ -569,12 +615,21 @@ void UStulWeaponManagerComponent::HandleReplicatedWeaponAdded(AStulWeapon* Weapo
 		return;
 	}
 
+	if (!Weapon->IsInitialized()) Weapon->OnWeaponReady.AddUniqueDynamic(this, &ThisClass::HandleReplicatedWeaponReady);
 	OnWeaponAdded.Broadcast(Weapon, SlotIndex);
+	RefreshReadyState();
 }
 
 void UStulWeaponManagerComponent::HandleReplicatedWeaponRemoved(AStulWeapon* Weapon, const int32 SlotIndex)
 {
+	if (IsValid(Weapon)) Weapon->OnWeaponReady.RemoveDynamic(this, &ThisClass::HandleReplicatedWeaponReady);
 	OnWeaponRemoved.Broadcast(Weapon, SlotIndex);
+}
+
+void UStulWeaponManagerComponent::HandleReplicatedWeaponReady(AStulWeapon* Weapon)
+{
+	if (IsValid(Weapon)) Weapon->OnWeaponReady.RemoveDynamic(this, &ThisClass::HandleReplicatedWeaponReady);
+	RefreshReadyState();
 }
 
 void UStulWeaponManagerComponent::OnRep_EquippedWeapon(AStulWeapon* PreviousWeapon)
@@ -583,9 +638,15 @@ void UStulWeaponManagerComponent::OnRep_EquippedWeapon(AStulWeapon* PreviousWeap
 
 	if (PreviousWeapon) PreviousWeapon->CancelActiveActions();
 	OnWeaponEquipped.Broadcast(EquippedWeapon, PreviousWeapon);
+	RefreshReadyState();
 }
 
-void UStulWeaponManagerComponent::OnRep_IsReady()
+void UStulWeaponManagerComponent::OnRep_DefaultLoadoutState()
 {
-	if (bIsReady) OnWeaponManagerReady.Broadcast();
+	RefreshReadyState();
+}
+
+void UStulWeaponManagerComponent::OnRep_ReadyWeaponCount()
+{
+	RefreshReadyState();
 }

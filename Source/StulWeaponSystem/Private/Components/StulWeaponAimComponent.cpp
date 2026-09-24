@@ -16,12 +16,13 @@
 UStulWeaponAimComponent::UStulWeaponAimComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
-	PrimaryComponentTick.bStartWithTickEnabled = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
 }
 
 void UStulWeaponAimComponent::BeginPlay()
 {
 	Super::BeginPlay();
+	if (APawn* OwnerPawn = Cast<APawn>(GetOwner())) OwnerPawn->ReceiveControllerChangedDelegate.AddUniqueDynamic(this, &ThisClass::HandleControllerChanged);
 	RefreshAimPresentation();
 }
 
@@ -29,6 +30,7 @@ void UStulWeaponAimComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	BindWeapon(nullptr);
 	if (WeaponManager) WeaponManager->OnWeaponEquipped.RemoveDynamic(this, &ThisClass::HandleWeaponEquipped);
+	if (APawn* OwnerPawn = Cast<APawn>(GetOwner())) OwnerPawn->ReceiveControllerChangedDelegate.RemoveDynamic(this, &ThisClass::HandleControllerChanged);
 	WeaponManager = nullptr;
 	Super::EndPlay(EndPlayReason);
 }
@@ -36,16 +38,7 @@ void UStulWeaponAimComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void UStulWeaponAimComponent::TickComponent(const float DeltaTime, const ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-	if (!IsLocallyPresented())
-	{
-		SetComponentTickEnabled(ShouldWaitForLocalControl());
-		return;
-	}
-	if (!WeaponManager)
-	{
-		RefreshAimPresentation();
-		return;
-	}
+	if (!IsLocallyPresented()) return;
 	ApplyAimPresentation();
 }
 
@@ -67,7 +60,10 @@ void UStulWeaponAimComponent::RefreshAimPresentation()
 {
 	if (!IsLocallyPresented())
 	{
-		SetComponentTickEnabled(ShouldWaitForLocalControl());
+		if (WeaponManager) WeaponManager->OnWeaponEquipped.RemoveDynamic(this, &ThisClass::HandleWeaponEquipped);
+		WeaponManager = nullptr;
+		BindWeapon(nullptr);
+		SetComponentTickEnabled(false);
 		return;
 	}
 
@@ -100,12 +96,6 @@ bool UStulWeaponAimComponent::IsLocallyPresented() const
 	return !OwnerPawn || OwnerPawn->IsLocallyControlled();
 }
 
-bool UStulWeaponAimComponent::ShouldWaitForLocalControl() const
-{
-	const APawn* OwnerPawn = Cast<APawn>(GetOwner());
-	return OwnerPawn && OwnerPawn->GetLocalRole() == ROLE_AutonomousProxy;
-}
-
 bool UStulWeaponAimComponent::ResolveViewTransform(FTransform& OutViewTransform) const
 {
 	AActor* OwnerActor = GetOwner();
@@ -127,23 +117,44 @@ bool UStulWeaponAimComponent::ResolveViewTransform(FTransform& OutViewTransform)
 
 bool UStulWeaponAimComponent::CaptureHipTransform()
 {
-	bPendingHipCapture = false;
 	bHasHipTransform = false;
 	if (!EquippedWeapon || !EquippedWeapon->GetRootComponent() || !EquippedWeapon->GetRootComponent()->GetAttachParent()) return false;
+	if (!EquippedWeapon->IsInitialized()) return false;
 
 	FStulWeaponAimData AimData;
 	USkeletalMeshComponent* WeaponMesh = EquippedWeapon->GetWeaponMesh();
 	if (!WeaponMesh || !EquippedWeapon->GetAimData(AimData) || !WeaponMesh->DoesSocketExist(AimData.AimSocketName))
 	{
-		if (!bLoggedInvalidSetup) UE_LOG(LogStulWeaponSystem, Warning, TEXT("Aim component cannot align weapon '%s' because its aim socket is unavailable."), *GetNameSafe(EquippedWeapon));
-		bLoggedInvalidSetup = true;
+		UE_LOG(LogStulWeaponSystem, Warning, TEXT("Aim component cannot align weapon '%s' because its aim socket is unavailable."), *GetNameSafe(EquippedWeapon));
+		StopHipTransformCapture();
 		return false;
 	}
 
 	HipRelativeTransform = EquippedWeapon->GetRootComponent()->GetRelativeTransform();
 	bHasHipTransform = true;
-	bLoggedInvalidSetup = false;
+	StopHipTransformCapture();
+	if (EquippedWeapon->IsAiming() || EquippedWeapon->GetAimAlpha() > UE_KINDA_SMALL_NUMBER) SetComponentTickEnabled(true);
 	return true;
+}
+
+void UStulWeaponAimComponent::BeginHipTransformCapture()
+{
+	USceneComponent* WeaponRoot = EquippedWeapon ? EquippedWeapon->GetRootComponent() : nullptr;
+	if (!WeaponRoot) return;
+	WeaponRoot->TransformUpdated.RemoveAll(this);
+	WeaponRoot->TransformUpdated.AddUObject(this, &ThisClass::HandleWeaponRootTransformUpdated);
+	CaptureHipTransform();
+}
+
+void UStulWeaponAimComponent::StopHipTransformCapture()
+{
+	if (EquippedWeapon && EquippedWeapon->GetRootComponent()) EquippedWeapon->GetRootComponent()->TransformUpdated.RemoveAll(this);
+}
+
+void UStulWeaponAimComponent::RestoreWeaponPresentation()
+{
+	if (bHasHipTransform && EquippedWeapon && EquippedWeapon->GetRootComponent()) EquippedWeapon->GetRootComponent()->SetRelativeTransform(HipRelativeTransform);
+	bHasHipTransform = false;
 }
 
 void UStulWeaponAimComponent::ApplyAimPresentation()
@@ -153,19 +164,21 @@ void UStulWeaponAimComponent::ApplyAimPresentation()
 		SetComponentTickEnabled(false);
 		return;
 	}
-	if (bPendingHipCapture && !CaptureHipTransform())
-	{
-		SetComponentTickEnabled(false);
-		return;
-	}
 	if (!bHasHipTransform) return;
 
-	USceneComponent* AttachParent = EquippedWeapon->GetRootComponent()->GetAttachParent();
 	USceneComponent* WeaponRoot = EquippedWeapon->GetRootComponent();
+	USceneComponent* AttachParent = WeaponRoot ? WeaponRoot->GetAttachParent() : nullptr;
 	USkeletalMeshComponent* WeaponMesh = EquippedWeapon->GetWeaponMesh();
 	FStulWeaponAimData AimData;
 	FTransform ViewTransform;
-	if (!AttachParent || !WeaponRoot || !WeaponMesh || !EquippedWeapon->GetAimData(AimData) || !ResolveViewTransform(ViewTransform)) return;
+	if (!AttachParent)
+	{
+		bHasHipTransform = false;
+		SetComponentTickEnabled(false);
+		BeginHipTransformCapture();
+		return;
+	}
+	if (!WeaponRoot || !WeaponMesh || !EquippedWeapon->GetAimData(AimData) || !ResolveViewTransform(ViewTransform)) return;
 
 	const FVector TargetLocation = ViewTransform.TransformPosition(AimTargetOffset);
 	const FQuat TargetRotation = ViewTransform.GetRotation() * AimTargetRotationOffset.Quaternion();
@@ -200,15 +213,28 @@ void UStulWeaponAimComponent::ApplyAimPresentation()
 
 void UStulWeaponAimComponent::BindWeapon(AStulWeapon* NewWeapon)
 {
-	if (EquippedWeapon == NewWeapon) return;
-	if (EquippedWeapon) EquippedWeapon->OnAimStateChanged.RemoveDynamic(this, &ThisClass::HandleAimStateChanged);
+	if (EquippedWeapon == NewWeapon)
+	{
+		if (EquippedWeapon && !bHasHipTransform) BeginHipTransformCapture();
+		return;
+	}
+	if (EquippedWeapon)
+	{
+		StopHipTransformCapture();
+		RestoreWeaponPresentation();
+		EquippedWeapon->OnAimStateChanged.RemoveDynamic(this, &ThisClass::HandleAimStateChanged);
+		EquippedWeapon->OnWeaponReady.RemoveDynamic(this, &ThisClass::HandleWeaponReady);
+	}
 
 	EquippedWeapon = NewWeapon;
 	bHasHipTransform = false;
-	bPendingHipCapture = IsValid(NewWeapon);
-	bLoggedInvalidSetup = false;
-	if (EquippedWeapon) EquippedWeapon->OnAimStateChanged.AddUniqueDynamic(this, &ThisClass::HandleAimStateChanged);
-	SetComponentTickEnabled(bPendingHipCapture);
+	SetComponentTickEnabled(false);
+	if (EquippedWeapon)
+	{
+		EquippedWeapon->OnAimStateChanged.AddUniqueDynamic(this, &ThisClass::HandleAimStateChanged);
+		EquippedWeapon->OnWeaponReady.AddUniqueDynamic(this, &ThisClass::HandleWeaponReady);
+		BeginHipTransformCapture();
+	}
 }
 
 void UStulWeaponAimComponent::HandleWeaponEquipped(AStulWeapon* NewWeapon, AStulWeapon* /*PreviousWeapon*/)
@@ -219,4 +245,19 @@ void UStulWeaponAimComponent::HandleWeaponEquipped(AStulWeapon* NewWeapon, AStul
 void UStulWeaponAimComponent::HandleAimStateChanged(AStulWeapon* Weapon, const bool /*bIsAiming*/)
 {
 	if (Weapon == EquippedWeapon && bHasHipTransform) SetComponentTickEnabled(true);
+}
+
+void UStulWeaponAimComponent::HandleWeaponReady(AStulWeapon* Weapon)
+{
+	if (Weapon == EquippedWeapon && !bHasHipTransform) CaptureHipTransform();
+}
+
+void UStulWeaponAimComponent::HandleControllerChanged(APawn* Pawn, AController* /*OldController*/, AController* /*NewController*/)
+{
+	if (Pawn == GetOwner()) RefreshAimPresentation();
+}
+
+void UStulWeaponAimComponent::HandleWeaponRootTransformUpdated(USceneComponent* UpdatedComponent, const EUpdateTransformFlags /*UpdateTransformFlags*/, const ETeleportType /*Teleport*/)
+{
+	if (EquippedWeapon && UpdatedComponent == EquippedWeapon->GetRootComponent()) CaptureHipTransform();
 }

@@ -27,10 +27,6 @@ private:
 	UFUNCTION()
 	void HandleInputReleased(float TimeHeld);
 
-	void SendAimEvent(FGameplayTag EventTag) const;
-
 	UPROPERTY(Transient)
 	TObjectPtr<UAbilityTask_WaitInputRelease> WaitInputReleaseTask;
-
-	bool bAimStarted = false;
 };

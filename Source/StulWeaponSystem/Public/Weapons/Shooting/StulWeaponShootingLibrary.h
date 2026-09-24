@@ -20,6 +20,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Stul Weapon System|Shooting")
 	static FVector CalculateShotDirection(const FStulWeaponShotRequest& Request);
 
+	/** Validates client-authored view data and resolves the server-owned trace origin. */
+	static bool ValidateAndResolveClientView(const FVector& ClientOrigin, const FVector& ClientDirection, const FVector& ServerOrigin, float MaxOriginError, FVector& OutTraceOrigin, FVector& OutAimDirection);
+
 	/** Offsets a muzzle in its local up/right plane using a pattern expressed in authored units. */
 	UFUNCTION(BlueprintPure, Category = "Stul Weapon System|Shooting")
 	static FVector CalculateMuzzleOffset(const FTransform& MuzzleTransform, const FVector2D& PatternOffset, float OffsetScale);
